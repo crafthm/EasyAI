@@ -1,0 +1,38 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "StartAI",
+  "version": "0.1.0",
+  "identifier": "com.startai.app",
+  "build": {
+    "beforeDevCommand": {
+      "script": "pnpm dev",
+      "cwd": "src/ui"
+    },
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": {
+      "script": "pnpm build",
+      "cwd": "src/ui"
+    },
+    "frontendDist": "src/ui/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "StartAI",
+        "width": 1024,
+        "height": 720,
+        "minWidth": 640,
+        "minHeight": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": ["icons/icon.png"]
+  }
+}
