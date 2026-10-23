@@ -155,6 +155,13 @@ body {
   outline-offset: -1px;
 }
 
+.popover-error {
+  margin: 10px 0 0;
+  color: #e5484d;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .popover-actions {
   display: flex;
   justify-content: flex-end;
@@ -177,6 +184,12 @@ body {
 
 .popover-button:hover {
   background: var(--hover);
+}
+
+.popover-button:disabled,
+.popover-input:disabled {
+  opacity: 0.6;
+  cursor: default;
 }
 
 .popover-button:focus-visible {
