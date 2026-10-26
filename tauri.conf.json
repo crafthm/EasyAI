@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "StartAI",
+  "productName": "EasyAI",
   "version": "0.1.0",
-  "identifier": "com.startai.app",
+  "identifier": "com.easyai.app",
   "build": {
     "beforeDevCommand": {
       "script": "pnpm dev",
@@ -19,7 +19,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "StartAI",
+        "title": "EasyAI",
         "width": 1024,
         "height": 720,
         "minWidth": 640,

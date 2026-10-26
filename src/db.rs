@@ -35,6 +35,7 @@ pub fn init(path: &Path) -> rusqlite::Result<()> {
     Ok(())
 }
 
+
 pub struct RepoInfo {
     pub id: i64,
     pub full_name: String,
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn upsert_repo_inserts_and_updates() {
         let path =
-            std::env::temp_dir().join(format!("startai-db-upsert-test-{}.db", std::process::id()));
+            std::env::temp_dir().join(format!("easyai-db-upsert-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
         init(&path).unwrap();
 
@@ -178,7 +179,7 @@ mod tests {
 
     #[test]
     fn init_creates_table_and_is_idempotent() {
-        let path = std::env::temp_dir().join(format!("startai-db-test-{}.db", std::process::id()));
+        let path = std::env::temp_dir().join(format!("easyai-db-test-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
         init(&path).unwrap();
@@ -197,4 +198,5 @@ mod tests {
         drop(conn);
         std::fs::remove_file(&path).unwrap();
     }
-}
+
+    }

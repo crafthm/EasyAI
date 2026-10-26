@@ -1,7 +1,7 @@
 [package]
-name = "startai"
+name = "easyai"
 version = "0.1.0"
-description = "StartAI desktop app"
+description = "EasyAI desktop app"
 edition = "2021"
 rust-version = "1.77"
 

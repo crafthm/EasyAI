@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -47,28 +46,29 @@ struct GithubLicense {
 #[tauri::command]
 pub async fn add_repo(state: State<'_, AppState>, url: String) -> Result<String, String> {
     let db_path = state.db_path.clone();
-    let repos_dir = state.repos_dir.clone();
-    tauri::async_runtime::spawn_blocking(move || add_repo_blocking(&db_path, &repos_dir, &url))
+    tauri::async_runtime::spawn_blocking(move || add_repo_blocking(&db_path, &url))
         .await
         .map_err(|err| format!("Failed to add repository: {err}"))?
 }
 
-fn add_repo_blocking(
-    db_path: &Path,
-    repos_dir: &Path,
-    url: &str,
-) -> Result<String, String> {
+fn add_repo_blocking(db_path: &Path, url: &str) -> Result<String, String> {
     let (owner, name) = parse_repo_url(url)?;
-    let repo = fetch_repo(&owner, &name)?;
-
-    let destination = repos_dir.join(&owner).join(&name);
-    if destination.exists() {
+    let destination = download_dir()?.join(&owner).join(&name);
+    if destination.join("README.md").exists() {
         return Err(format!(
-            "This repository is already cloned at {}.",
+            "This repository has already been added at {}.",
             destination.display()
         ));
     }
-    clone_repo(&repo.clone_url, &destination)?;
+
+    let repo = fetch_repo(&owner, &name)?;
+    let readme = fetch_readme(&owner, &name)?;
+
+    fs::create_dir_all(&destination)
+        .map_err(|err| format!("Failed to create {}: {err}", destination.display()))?;
+    let readme_path = destination.join("README.md");
+    fs::write(&readme_path, readme)
+        .map_err(|err| format!("Failed to write {}: {err}", readme_path.display()))?;
 
     db::upsert_repo(
         db_path,
@@ -142,14 +142,25 @@ fn is_valid_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
-fn fetch_repo(owner: &str, name: &str) -> Result<GithubRepo, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("StartAI/0.1")
+/// Repositories are saved next to the running executable and are not configurable.
+fn download_dir() -> Result<std::path::PathBuf, String> {
+    let exe = std::env::current_exe()
+        .map_err(|err| format!("Failed to locate the application: {err}"))?;
+    exe.parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Failed to locate the application directory.".to_string())
+}
+
+fn http_client() -> Result<reqwest::blocking::Client, String> {
+    reqwest::blocking::Client::builder()
+        .user_agent("EasyAI/0.1")
         .timeout(Duration::from_secs(30))
         .build()
-        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
+        .map_err(|err| format!("Failed to create HTTP client: {err}"))
+}
 
-    let response = client
+fn fetch_repo(owner: &str, name: &str) -> Result<GithubRepo, String> {
+    let response = http_client()?
         .get(format!("https://api.github.com/repos/{owner}/{name}"))
         .send()
         .map_err(|err| format!("Could not reach GitHub: {err}"))?;
@@ -168,27 +179,30 @@ fn fetch_repo(owner: &str, name: &str) -> Result<GithubRepo, String> {
         .map_err(|err| format!("Invalid response from GitHub: {err}"))
 }
 
-fn clone_repo(clone_url: &str, destination: &Path) -> Result<(), String> {
-    if let Some(parent) = destination.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|err| format!("Failed to create {}: {err}", parent.display()))?;
+/// Downloads the root README through GitHub's readme endpoint, which resolves
+/// the file name's casing and extension (`README.md`, `readme.rst`, ...).
+fn fetch_readme(owner: &str, name: &str) -> Result<Vec<u8>, String> {
+    let response = http_client()?
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/readme"
+        ))
+        .header("Accept", "application/vnd.github.raw")
+        .send()
+        .map_err(|err| format!("Could not reach GitHub: {err}"))?;
+
+    let status = response.status();
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            404 => "This repository has no README at its root.".to_string(),
+            403 => "GitHub API rate limit exceeded. Try again later.".to_string(),
+            _ => format!("GitHub API returned {status}."),
+        });
     }
 
-    let output = Command::new("git")
-        .args(["clone", "--quiet"])
-        .arg(clone_url)
-        .arg(destination)
-        .output()
-        .map_err(|err| format!("Failed to run git (is Git installed?): {err}"))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "git clone failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    Ok(())
+    response
+        .bytes()
+        .map(|bytes| bytes.to_vec())
+        .map_err(|err| format!("Failed to read README from GitHub: {err}"))
 }
 
 #[cfg(test)]

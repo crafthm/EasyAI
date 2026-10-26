@@ -1,9 +1,11 @@
 import { useState } from 'react'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { GearIcon, PlusIcon } from './icons'
+import { SettingsPopover } from './SettingsPopover'
 
 export function Toolbar() {
   const [addOpen, setAddOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [url, setUrl] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -36,7 +38,7 @@ export function Toolbar() {
 
   return (
     <header className="toolbar">
-      <h1 className="brand">StartAI</h1>
+      <h1 className="brand">EasyAI</h1>
       <div className="toolbar-actions">
         <div className="popover-anchor">
           <button
@@ -48,6 +50,7 @@ export function Toolbar() {
             aria-expanded={addOpen}
             onClick={() => {
               setAddOpen((open) => !open)
+              setSettingsOpen(false)
               setError(null)
             }}
           >
@@ -98,9 +101,25 @@ export function Toolbar() {
             </div>
           )}
         </div>
-        <button type="button" className="icon-button" title="Settings" aria-label="Settings">
-          <GearIcon />
-        </button>
+        <div className="popover-anchor">
+          <button
+            type="button"
+            className="icon-button"
+            title="Settings"
+            aria-label="Settings"
+            aria-haspopup="dialog"
+            aria-expanded={settingsOpen}
+            onClick={() => {
+              setSettingsOpen((open) => !open)
+              setAddOpen(false)
+            }}
+          >
+            <GearIcon />
+          </button>
+          {settingsOpen && (
+            <SettingsPopover onClose={() => setSettingsOpen(false)} />
+          )}
+        </div>
       </div>
     </header>
   )

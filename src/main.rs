@@ -9,7 +9,6 @@ use tauri::Manager;
 
 pub struct AppState {
     pub db_path: PathBuf,
-    pub repos_dir: PathBuf,
 }
 
 fn main() {
@@ -17,11 +16,9 @@ fn main() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
-            let db_path = data_dir.join("startai.db");
+            let db_path = data_dir.join("easyai.db");
             db::init(&db_path)?;
-            let repos_dir = data_dir.join("repos");
-            std::fs::create_dir_all(&repos_dir)?;
-            app.manage(AppState { db_path, repos_dir });
+            app.manage(AppState { db_path });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![github::add_repo])
