@@ -1,3 +1,11 @@
+<!--
+ * @Author: turbosnail 11001400@qq.com
+ * @Date: 2026-10-22 08:38:00
+ * @LastEditors: turbosnail 11001400@qq.com
+ * @LastEditTime: 2026-10-24 10:55:21
+ * @FilePath: /startAI/CLAUDE.md
+ * @Description: 这是默认设置,请设置`customMade`, 打开koroFileHeader查看配置 进行设置: https://github.com/OBKoro1/koro1FileHeader/wiki/%E9%85%8D%E7%BD%AE
+-->
 
 # CLAUDE.md
 
@@ -69,3 +77,15 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+
+##  Tech Stack 
+
+ [Tech Stack: Rust + Tauri, Source Code Root Directory src/](tech-stack-rust-tauri.md) — Rust is in src/, frontend is in src/ui/, no use of src-tauri/ or root-level ui/
+
+---
+
+## Project Language
+
+The documents and application interface text in the project are all in English.
+
