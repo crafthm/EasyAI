@@ -1,0 +1,26 @@
+{
+  "id": "ollama",
+  "name": "Ollama",
+  "description": "Run large language models locally",
+  "glyph": "O",
+  "color": "linear-gradient(135deg, #6366f1, #8b5cf6)",
+  "platforms": ["linux-x86_64", "linux-aarch64"],
+  "install": {
+    "kind": "github-release-binary",
+    "repo": "ollama/ollama",
+    "asset": {
+      "linux-x86_64": "ollama-linux-amd64.tar.zst",
+      "linux-aarch64": "ollama-linux-arm64.tar.zst"
+    }
+  },
+  "service": {
+    "command": ["{install_dir}/bin/ollama", "serve"],
+    "health_url": "http://127.0.0.1:11434/api/version",
+    "env": {
+      "OLLAMA_HOST": "127.0.0.1:11434"
+    }
+  },
+  "uninstall": {
+    "keep_paths": ["~/.ollama"]
+  }
+}

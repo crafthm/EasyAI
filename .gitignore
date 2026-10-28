@@ -1,4 +1,6 @@
 .history/
+.claude/
+openspec/
 target/
 src/ui/node_modules/
 src/ui/dist/
