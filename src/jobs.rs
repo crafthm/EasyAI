@@ -168,11 +168,13 @@ impl JobLogger {
         app_id: &str,
         kind: &str,
         origin: &str,
+        method_id: Option<&str>,
+        plan_json: Option<&str>,
     ) -> Result<Self, String> {
         std::fs::create_dir_all(logs_dir)
             .map_err(|err| format!("Failed to create log directory: {err}"))?;
 
-        let job_id = db::create_job(db_path, app_id, kind, origin, "")
+        let job_id = db::create_job(db_path, app_id, kind, origin, "", method_id, plan_json)
             .map_err(|err| format!("Failed to record job: {err}"))?;
         let log_path = logs_dir.join(format!("{job_id}.log"));
         db::set_job_log_path(db_path, job_id, &log_path.to_string_lossy())

@@ -30,14 +30,18 @@ CREATE TABLE IF NOT EXISTS github_repos (
 );
 
 CREATE TABLE IF NOT EXISTS installed_apps (
-    app_id       TEXT PRIMARY KEY,
-    version      TEXT NOT NULL,
-    install_dir  TEXT NOT NULL,
-    method       TEXT NOT NULL,
-    state        TEXT NOT NULL,
-    managed      INTEGER NOT NULL DEFAULT 1,
-    installed_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+    app_id          TEXT PRIMARY KEY,
+    version         TEXT NOT NULL,
+    install_dir     TEXT NOT NULL,
+    method          TEXT NOT NULL,
+    state           TEXT NOT NULL,
+    managed         INTEGER NOT NULL DEFAULT 1,
+    method_id       TEXT,
+    method_kind     TEXT,
+    provenance_json TEXT,
+    bom_path        TEXT,
+    installed_at    TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 CREATE TABLE IF NOT EXISTS jobs (
@@ -48,8 +52,15 @@ CREATE TABLE IF NOT EXISTS jobs (
     state       TEXT NOT NULL,
     error       TEXT,
     log_path    TEXT NOT NULL,
+    method_id   TEXT,
+    plan_json   TEXT,
     created_at  TEXT NOT NULL DEFAULT (datetime('now')),
     finished_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 "#;
 
@@ -61,6 +72,10 @@ pub struct InstalledApp {
     pub method: String,
     pub state: String,
     pub managed: bool,
+    pub method_id: Option<String>,
+    pub method_kind: Option<String>,
+    pub provenance_json: Option<String>,
+    pub bom_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -73,6 +88,8 @@ pub struct JobRecord {
     pub state: String,
     pub error: Option<String>,
     pub log_path: String,
+    pub method_id: Option<String>,
+    pub plan_json: Option<String>,
     pub created_at: String,
     pub finished_at: Option<String>,
 }
@@ -80,7 +97,45 @@ pub struct JobRecord {
 pub fn init(path: &Path) -> rusqlite::Result<()> {
     let conn = Connection::open(path)?;
     conn.execute_batch(SCHEMA)?;
+    migrate(&conn)?;
+    conn.pragma_update(None, "user_version", 2)?;
     Ok(())
+}
+
+fn migrate(conn: &Connection) -> rusqlite::Result<()> {
+    for (table, column, declaration) in [
+        ("installed_apps", "method_id", "TEXT"),
+        ("installed_apps", "method_kind", "TEXT"),
+        ("installed_apps", "provenance_json", "TEXT"),
+        ("installed_apps", "bom_path", "TEXT"),
+        ("jobs", "method_id", "TEXT"),
+        ("jobs", "plan_json", "TEXT"),
+    ] {
+        if !has_column(conn, table, column)? {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {declaration}"),
+                [],
+            )?;
+        }
+    }
+    conn.execute(
+        "UPDATE installed_apps
+         SET method_kind = 'release'
+         WHERE method_kind IS NULL AND method IN ('github-release-binary', 'release')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
+    let mut statement = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+    let names = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for name in names {
+        if name? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 
@@ -171,7 +226,8 @@ pub fn upsert_repo(path: &Path, repo: &RepoInfo) -> rusqlite::Result<()> {
 pub fn get_installed(path: &Path, app_id: &str) -> rusqlite::Result<Option<InstalledApp>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT app_id, version, install_dir, method, state, managed
+        "SELECT app_id, version, install_dir, method, state, managed,
+                method_id, method_kind, provenance_json, bom_path
          FROM installed_apps WHERE app_id = ?1",
     )?;
     let mut rows = stmt.query(params![app_id])?;
@@ -183,6 +239,10 @@ pub fn get_installed(path: &Path, app_id: &str) -> rusqlite::Result<Option<Insta
             method: row.get(3)?,
             state: row.get(4)?,
             managed: row.get::<_, i64>(5)? != 0,
+            method_id: row.get(6)?,
+            method_kind: row.get(7)?,
+            provenance_json: row.get(8)?,
+            bom_path: row.get(9)?,
         })),
         None => Ok(None),
     }
@@ -191,7 +251,8 @@ pub fn get_installed(path: &Path, app_id: &str) -> rusqlite::Result<Option<Insta
 pub fn list_installed(path: &Path) -> rusqlite::Result<Vec<InstalledApp>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT app_id, version, install_dir, method, state, managed
+        "SELECT app_id, version, install_dir, method, state, managed,
+                method_id, method_kind, provenance_json, bom_path
          FROM installed_apps ORDER BY app_id",
     )?;
     let rows = stmt.query_map([], |row| {
@@ -202,6 +263,10 @@ pub fn list_installed(path: &Path) -> rusqlite::Result<Vec<InstalledApp>> {
             method: row.get(3)?,
             state: row.get(4)?,
             managed: row.get::<_, i64>(5)? != 0,
+            method_id: row.get(6)?,
+            method_kind: row.get(7)?,
+            provenance_json: row.get(8)?,
+            bom_path: row.get(9)?,
         })
     })?;
     rows.collect()
@@ -211,14 +276,21 @@ pub fn upsert_installed(path: &Path, app: &InstalledApp) -> rusqlite::Result<()>
     let conn = Connection::open(path)?;
     conn.execute(
         r#"
-        INSERT INTO installed_apps (app_id, version, install_dir, method, state, managed)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+        INSERT INTO installed_apps (
+            app_id, version, install_dir, method, state, managed,
+            method_id, method_kind, provenance_json, bom_path
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
         ON CONFLICT(app_id) DO UPDATE SET
             version = excluded.version,
             install_dir = excluded.install_dir,
             method = excluded.method,
             state = excluded.state,
             managed = excluded.managed,
+            method_id = excluded.method_id,
+            method_kind = excluded.method_kind,
+            provenance_json = excluded.provenance_json,
+            bom_path = excluded.bom_path,
             updated_at = datetime('now')
         "#,
         params![
@@ -228,6 +300,10 @@ pub fn upsert_installed(path: &Path, app: &InstalledApp) -> rusqlite::Result<()>
             app.method,
             app.state,
             app.managed,
+            app.method_id,
+            app.method_kind,
+            app.provenance_json,
+            app.bom_path,
         ],
     )?;
     Ok(())
@@ -255,18 +331,40 @@ pub fn delete_installed(path: &Path, app_id: &str) -> rusqlite::Result<()> {
     Ok(())
 }
 
+pub fn get_setting(path: &Path, key: &str) -> rusqlite::Result<Option<String>> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+    let mut rows = statement.query(params![key])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+pub fn set_setting(path: &Path, key: &str, value: &str) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
 pub fn create_job(
     path: &Path,
     app_id: &str,
     kind: &str,
     origin: &str,
     log_path: &str,
+    method_id: Option<&str>,
+    plan_json: Option<&str>,
 ) -> rusqlite::Result<i64> {
     let conn = Connection::open(path)?;
     conn.execute(
-        "INSERT INTO jobs (app_id, kind, origin, state, log_path)
-         VALUES (?1, ?2, ?3, 'running', ?4)",
-        params![app_id, kind, origin, log_path],
+        "INSERT INTO jobs (app_id, kind, origin, state, log_path, method_id, plan_json)
+         VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6)",
+        params![app_id, kind, origin, log_path, method_id, plan_json],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -309,7 +407,8 @@ pub fn mark_running_jobs_failed(path: &Path, error: &str) -> rusqlite::Result<us
 pub fn list_jobs(path: &Path, app_id: &str) -> rusqlite::Result<Vec<JobRecord>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, app_id, kind, origin, state, error, log_path, created_at, finished_at
+        "SELECT id, app_id, kind, origin, state, error, log_path,
+                method_id, plan_json, created_at, finished_at
          FROM jobs WHERE app_id = ?1 ORDER BY id DESC",
     )?;
     let rows = stmt.query_map(params![app_id], |row| {
@@ -321,8 +420,10 @@ pub fn list_jobs(path: &Path, app_id: &str) -> rusqlite::Result<Vec<JobRecord>> 
             state: row.get(4)?,
             error: row.get(5)?,
             log_path: row.get(6)?,
-            created_at: row.get(7)?,
-            finished_at: row.get(8)?,
+            method_id: row.get(7)?,
+            plan_json: row.get(8)?,
+            created_at: row.get(9)?,
+            finished_at: row.get(10)?,
         })
     })?;
     rows.collect()
@@ -331,7 +432,8 @@ pub fn list_jobs(path: &Path, app_id: &str) -> rusqlite::Result<Vec<JobRecord>> 
 pub fn get_job(path: &Path, job_id: i64) -> rusqlite::Result<Option<JobRecord>> {
     let conn = Connection::open(path)?;
     let mut stmt = conn.prepare(
-        "SELECT id, app_id, kind, origin, state, error, log_path, created_at, finished_at
+        "SELECT id, app_id, kind, origin, state, error, log_path,
+                method_id, plan_json, created_at, finished_at
          FROM jobs WHERE id = ?1",
     )?;
     let mut rows = stmt.query(params![job_id])?;
@@ -344,8 +446,10 @@ pub fn get_job(path: &Path, job_id: i64) -> rusqlite::Result<Option<JobRecord>> 
             state: row.get(4)?,
             error: row.get(5)?,
             log_path: row.get(6)?,
-            created_at: row.get(7)?,
-            finished_at: row.get(8)?,
+            method_id: row.get(7)?,
+            plan_json: row.get(8)?,
+            created_at: row.get(9)?,
+            finished_at: row.get(10)?,
         })),
         None => Ok(None),
     }
@@ -421,12 +525,12 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master
                  WHERE type = 'table'
-                   AND name IN ('github_repos', 'installed_apps', 'jobs')",
+                   AND name IN ('github_repos', 'installed_apps', 'jobs', 'settings')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
 
         drop(conn);
         std::fs::remove_file(&path).unwrap();
@@ -437,9 +541,13 @@ mod tests {
             app_id: "ollama".to_string(),
             version: "0.12.0".to_string(),
             install_dir: "/tmp/easyai/ollama/0.12.0".to_string(),
-            method: "github-release-binary".to_string(),
+            method: "release".to_string(),
             state: "stopped".to_string(),
             managed: true,
+            method_id: Some("release-linux".to_string()),
+            method_kind: Some("release".to_string()),
+            provenance_json: None,
+            bom_path: None,
         }
     }
 
@@ -476,18 +584,30 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         init(&path).unwrap();
 
-        let job_id = create_job(&path, "ollama", "install", "assistant", "").unwrap();
+        let job_id = create_job(
+            &path,
+            "ollama",
+            "install",
+            "assistant",
+            "",
+            Some("release-linux"),
+            Some("{\"methodId\":\"release-linux\"}"),
+        )
+        .unwrap();
         set_job_log_path(&path, job_id, "/tmp/job.log").unwrap();
         let job = get_job(&path, job_id).unwrap().unwrap();
         assert_eq!(job.state, "running");
         assert_eq!(job.origin, "assistant");
+        assert_eq!(job.method_id.as_deref(), Some("release-linux"));
+        assert!(job.plan_json.is_some());
 
         finish_job(&path, job_id, "succeeded", None).unwrap();
         let job = get_job(&path, job_id).unwrap().unwrap();
         assert_eq!(job.state, "succeeded");
         assert!(job.finished_at.is_some());
 
-        let stale_id = create_job(&path, "ollama", "start", "ui", "").unwrap();
+        let stale_id =
+            create_job(&path, "ollama", "start", "ui", "", Some("release-linux"), None).unwrap();
         let changed = mark_running_jobs_failed(&path, "Interrupted by application exit.").unwrap();
         assert_eq!(changed, 1);
         let stale = get_job(&path, stale_id).unwrap().unwrap();
@@ -495,6 +615,60 @@ mod tests {
         assert!(stale.error.unwrap().contains("Interrupted"));
 
         assert_eq!(list_jobs(&path, "ollama").unwrap().len(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn settings_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-settings-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        init(&path).unwrap();
+        assert!(get_setting(&path, "method_tiers").unwrap().is_none());
+        set_setting(&path, "method_tiers", "{\"order\":[\"T0\"]}").unwrap();
+        assert_eq!(
+            get_setting(&path, "method_tiers").unwrap().as_deref(),
+            Some("{\"order\":[\"T0\"]}")
+        );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn migrates_the_previous_schema() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-migration-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE installed_apps (
+                app_id TEXT PRIMARY KEY,
+                version TEXT NOT NULL,
+                install_dir TEXT NOT NULL,
+                method TEXT NOT NULL,
+                state TEXT NOT NULL,
+                managed INTEGER NOT NULL DEFAULT 1,
+                installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             INSERT INTO installed_apps (app_id, version, install_dir, method, state, managed)
+             VALUES ('ollama', '1.0.0', '/tmp/ollama', 'github-release-binary', 'stopped', 1);",
+        )
+        .unwrap();
+        drop(conn);
+
+        init(&path).unwrap();
+        let record = get_installed(&path, "ollama").unwrap().unwrap();
+        assert_eq!(record.method_kind.as_deref(), Some("release"));
+        let version: i64 = Connection::open(&path)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+
         std::fs::remove_file(&path).unwrap();
     }
 }

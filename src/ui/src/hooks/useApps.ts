@@ -91,7 +91,20 @@ export function useApps() {
     error,
     refresh,
     dismissError: () => setError(null),
-    install: (appId: string) => run(() => installApp(appId)),
+    install: async (
+      appId: string,
+      methodId: string | null,
+      allowAdvanced: boolean,
+      allowElevation: boolean,
+    ) => {
+      setError(null)
+      try {
+        await installApp(appId, methodId, allowAdvanced, allowElevation)
+      } catch (err) {
+        setError(String(err))
+        throw err
+      }
+    },
     start: (appId: string) => run(() => startApp(appId)),
     stop: (appId: string) => run(() => stopApp(appId)),
   }

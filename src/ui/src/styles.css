@@ -639,6 +639,138 @@ body {
   color: #e5484d;
 }
 
+/* 安装方式优先级设置 */
+.settings-popover {
+  width: 640px;
+}
+
+.settings-hint {
+  margin: 0 0 10px;
+  font-size: 12px;
+  line-height: 1.5;
+  opacity: 0.7;
+}
+
+.tier-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tier-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+
+.tier-order {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--hover);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tier-copy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tier-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tier-detail {
+  font-size: 11px;
+  opacity: 0.65;
+}
+
+.tier-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.tier-actions > button {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.tier-actions > button:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.tier-actions > button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.tier-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.settings-saved {
+  margin: 8px 0 0;
+  color: #16a34a;
+  font-size: 12px;
+}
+
+.plan-section {
+  margin-top: 14px;
+}
+
+.plan-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.plan-rejected {
+  opacity: 0.8;
+}
+
+.plan-toggles {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+  font-size: 13px;
+  user-select: none;
+}
+
+.plan-toggles label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .import-actions {
   display: flex;
   justify-content: flex-end;

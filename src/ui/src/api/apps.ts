@@ -21,12 +21,44 @@ export type AppSummary = {
   version: string | null
   managed: boolean
   sourceUrl: string | null
+  methodId: string | null
+  methodKind: string | null
 }
 
 export type AppDetail = AppSummary & {
   installDir: string | null
   method: string | null
   healthOk: boolean
+  provenanceJson: string | null
+  bomPath: string | null
+}
+
+export type ExistingInstall = {
+  methodId: string | null
+  kind: string
+  location: string
+  version: string | null
+  managed: boolean
+}
+
+export type InstallPlanRejection = {
+  methodId: string
+  reason: string
+}
+
+export type InstallPlan = {
+  appId: string
+  methodId: string
+  methodKind: string
+  tier: string
+  score: number
+  rationale: string[]
+  rejected: InstallPlanRejection[]
+  estimatedSize: number | null
+  needsElevation: boolean
+  advanced: boolean
+  existing: ExistingInstall[]
+  action: string
 }
 
 export type RecipeInstall = {
@@ -55,6 +87,11 @@ export type Recipe = {
   install: RecipeInstall | null
   service: RecipeService | null
   uninstall: RecipeUninstall | null
+}
+
+export type MethodSettings = {
+  order: string[]
+  enabled: Record<string, boolean>
 }
 
 export type RecipePreview = {
@@ -107,8 +144,34 @@ export function getAppDetail(appId: string): Promise<AppDetail> {
   return invoke('get_app_detail', { appId })
 }
 
-export function installApp(appId: string): Promise<void> {
-  return invoke('install_app', { appId, origin: 'ui', confirmed: true })
+export function planInstall(
+  appId: string,
+  methodId: string | null,
+  allowAdvanced: boolean,
+  allowElevation: boolean,
+): Promise<InstallPlan> {
+  return invoke('plan_install', {
+    appId,
+    methodId,
+    allowAdvanced,
+    allowElevation,
+  })
+}
+
+export function installApp(
+  appId: string,
+  methodId: string | null,
+  allowAdvanced: boolean,
+  allowElevation: boolean,
+): Promise<void> {
+  return invoke('install_app', {
+    appId,
+    methodId,
+    allowAdvanced,
+    allowElevation,
+    origin: 'ui',
+    confirmed: true,
+  })
 }
 
 export function startApp(appId: string): Promise<void> {
@@ -147,6 +210,18 @@ export function importRecipe(url: string, sha256: string): Promise<void> {
 export function removeRecipe(appId: string): Promise<void> {
   return invoke('remove_recipe', {
     appId,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function getMethodSettings(): Promise<MethodSettings> {
+  return invoke('get_method_settings')
+}
+
+export function saveMethodSettings(settings: MethodSettings): Promise<void> {
+  return invoke('save_method_settings', {
+    settings,
     origin: 'ui',
     confirmed: true,
   })

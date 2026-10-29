@@ -185,7 +185,10 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
             </div>
             <div className="detail-row">
               <span>Install method</span>
-              <span>{detail.method ?? '—'}</span>
+              <span>
+                {detail.methodId ?? detail.method ?? '—'}
+                {detail.methodKind ? ` (${detail.methodKind})` : ''}
+              </span>
             </div>
             <div className="detail-row">
               <span>Install path</span>
@@ -201,6 +204,12 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
               <div className="detail-row">
                 <span>Recipe source</span>
                 <span className="detail-path">{detail.sourceUrl}</span>
+              </div>
+            )}
+            {detail.bomPath && (
+              <div className="detail-row">
+                <span>Bill of materials</span>
+                <span className="detail-path">{detail.bomPath}</span>
               </div>
             )}
 
@@ -235,6 +244,13 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
               )}
             </div>
           </>
+        )}
+
+        {detail?.provenanceJson && (
+          <div className="plan-section">
+            <h3 className="detail-section-title">Provenance</h3>
+            <pre className="job-log">{detail.provenanceJson}</pre>
+          </div>
         )}
 
         <h3 className="detail-section-title">Recent jobs</h3>

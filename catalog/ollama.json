@@ -4,23 +4,93 @@
   "description": "Run large language models locally",
   "glyph": "O",
   "color": "linear-gradient(135deg, #6366f1, #8b5cf6)",
-  "platforms": ["linux-x86_64", "linux-aarch64"],
-  "install": {
-    "kind": "github-release-binary",
-    "repo": "ollama/ollama",
-    "asset": {
-      "linux-x86_64": "ollama-linux-amd64.tar.zst",
-      "linux-aarch64": "ollama-linux-arm64.tar.zst"
+  "platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"],
+  "methods": [
+    {
+      "id": "release-linux",
+      "kind": "release",
+      "when": {
+        "os": ["linux"],
+        "arch": ["x86_64", "aarch64"]
+      },
+      "prefer": 80,
+      "source": {
+        "repo": "ollama/ollama",
+        "asset": {
+          "linux-x86_64": "ollama-linux-amd64.tar.zst",
+          "linux-aarch64": "ollama-linux-arm64.tar.zst"
+        }
+      },
+      "version": {
+        "type": "github-release",
+        "repo": "ollama/ollama"
+      },
+      "service": {
+        "command": ["{install_dir}/bin/ollama", "serve"],
+        "health_url": "http://127.0.0.1:11434/api/version",
+        "env": {
+          "OLLAMA_HOST": "127.0.0.1:11434"
+        }
+      },
+      "uninstall": {
+        "keep_paths": ["~/.ollama"]
+      }
+    },
+    {
+      "id": "container",
+      "kind": "container",
+      "when": {
+        "runtime": ["docker", "podman"]
+      },
+      "prefer": 70,
+      "image": {
+        "image": "ollama/ollama",
+        "tag": "latest",
+        "runtime": "auto",
+        "volumes": ["ollama:/root/.ollama"],
+        "ports": ["11434:11434"],
+        "env": {},
+        "gpu": "auto",
+        "restart": "unless-stopped"
+      },
+      "version": {
+        "type": "image",
+        "image": "ollama/ollama"
+      },
+      "service": {
+        "command": [],
+        "health_url": "http://127.0.0.1:11434/api/version"
+      },
+      "uninstall": {
+        "native": true
+      }
+    },
+    {
+      "id": "brew",
+      "kind": "package-manager",
+      "when": {
+        "manager": ["brew"]
+      },
+      "prefer": 60,
+      "package": {
+        "manager": "brew",
+        "package": "ollama"
+      },
+      "version": {
+        "type": "registry",
+        "package": "ollama"
+      },
+      "service": {
+        "command": ["ollama", "serve"],
+        "health_url": "http://127.0.0.1:11434/api/version",
+        "env": {
+          "OLLAMA_HOST": "127.0.0.1:11434"
+        }
+      },
+      "uninstall": {
+        "native": true,
+        "keep_paths": ["~/.ollama"]
+      }
     }
-  },
-  "service": {
-    "command": ["{install_dir}/bin/ollama", "serve"],
-    "health_url": "http://127.0.0.1:11434/api/version",
-    "env": {
-      "OLLAMA_HOST": "127.0.0.1:11434"
-    }
-  },
-  "uninstall": {
-    "keep_paths": ["~/.ollama"]
-  }
+  ]
 }

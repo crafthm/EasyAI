@@ -6,7 +6,9 @@ mod db;
 mod github;
 mod jobs;
 mod lifecycle;
+mod methods;
 mod probe;
+mod resolve;
 mod tools;
 
 use std::path::PathBuf;
@@ -51,6 +53,7 @@ fn main() {
             github::add_repo,
             commands::list_apps,
             commands::get_app_detail,
+            commands::plan_install,
             commands::install_app,
             commands::start_app,
             commands::stop_app,
@@ -60,6 +63,9 @@ fn main() {
             commands::preview_recipe,
             commands::import_recipe,
             commands::remove_recipe,
+            commands::get_bom,
+            commands::get_method_settings,
+            commands::save_method_settings,
             commands::list_tools
         ])
         .run(tauri::generate_context!())

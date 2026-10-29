@@ -43,6 +43,7 @@ guided, reversible operation, and extends the same operations to other machines 
 | D8 | State in SQLite, logs and user files on disk | Everything in the DB | Logs are large and should be tail-able/attachable |
 | D9 | **Each tile is one catalog application** and the lifecycle control surface; the grid is the home screen | Separate catalog page and installed-only grid | Matches the product model; installation starts where the application lives |
 | D10 | **Layered harness**: deterministic recipe tools are the execution substrate; an optional LLM harness may only propose, diagnose, and patch configuration | Agent-driven execution core | Reproducibility, safety, offline operation; intelligence is most useful where rules are incomplete |
+| D11 | **Install methods are ranked**: release binaries, containers, package managers, and portable bundles come before source builds; source is a fallback | One method per app / source-first | Most Git repos expose faster, more isolated, more reproducible channels; source builds are slow and fragile. See [install-methods.md](install-methods.md) |
 
 ## 3. Architecture
 
@@ -88,56 +89,79 @@ The engine is a Rust library (`src/lib.rs`) used by both the desktop binary and 
 ### 4.1 Recipe
 
 A recipe is YAML/JSON validated by a JSON Schema and distributed through a signed catalog. It
-declares *what* an app needs, not *how one specific machine* will install it.
+declares *what* an app needs, not *how one specific machine* will install it. A recipe carries
+several ranked install methods; the full taxonomy, discovery signals, and scoring model are in
+[install-methods.md](install-methods.md).
 
 ```yaml
 id: comfyui
 name: ComfyUI
-category: image-generation
-homepage: https://github.com/comfyanonymous/ComfyUI
-license: GPL-3.0
-platforms: [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64, windows-x86_64]
-requirements:
-  ram_mb: 8192
-  disk_mb: 20480
-  gpu: optional            # runs on CPU, much faster on GPU
+description: Node-based image generation
+glyph: C
+color: "linear-gradient(135deg, #f59e0b, #f97316)"
+platforms: [linux-x86_64, macos-aarch64, windows-x86_64]
 methods:
-  - id: uv-venv
-    kind: python-venv
-    when: { python: ">=3.10", disk_mb: 20480 }
-    steps:
-      - { kind: git_clone, url: "https://github.com/comfyanonymous/ComfyUI.git", dest: "{app_dir}" }
-      - { kind: run, cmd: "uv venv --python 3.11 .venv" }
-      - { kind: pip_install, packages: [torch, torchvision, torchaudio], index: "{torch_index}" }
-      - { kind: pip_install, requirements: "requirements.txt" }
-    prefer: 80
-  - id: docker
+  - id: windows-portable-nvidia
+    kind: portable
+    when: { os: [windows], gpu: [cuda] }
+    prefer: 90
+    source: { repo: comfyanonymous/ComfyUI, asset: ComfyUI_windows_portable_nvidia.7z }
+    version: { type: github-release, repo: comfyanonymous/ComfyUI }
+    service:
+      command: ["{app_dir}/python_embeded/python.exe", "-s", "ComfyUI/main.py", "--port", "8188"]
+      health_url: "http://127.0.0.1:8188/system_stats"
+    uninstall: { keep_paths: ["{app_dir}/models"] }
+
+  - id: container
     kind: container
-    when: { runtime: [docker, podman], gpu: cuda }
-    image: ghcr.io/example/comfyui:latest
+    when: { runtime: [docker, podman], gpu: [cuda, rocm, cpu] }
+    prefer: 70
+    image:
+      image: ghcr.io/example/comfyui
+      tag: "{version}"
+      volumes: ["{app_dir}/models:/app/models"]
+      ports: ["8188:8188"]
+      gpu: auto
+      restart: unless-stopped
+    version: { type: image, image: ghcr.io/example/comfyui }
+    service:
+      command: []
+      health_url: "http://127.0.0.1:8188/system_stats"
+    uninstall: { native: true }
+
+  - id: uv-venv
+    kind: source
+    advanced: true
+    when: { os: [linux, macos], toolchain: [git, python], min_disk_mb: 20480 }
     prefer: 60
-version:
-  type: github-release
-  repo: comfyanonymous/ComfyUI
-  asset_pattern: null
-service:
-  kind: managed-process
-  command: "{app_dir}/.venv/bin/python main.py --listen 127.0.0.1 --port 8188"
-  port: 8188
-  health: { type: http, url: "http://127.0.0.1:8188/system_stats" }
-config:
-  files:
-    - { path: "{app_dir}/config.json", format: json, schema: schemas/comfyui.schema.json }
-  env: [COMFYUI_EXTRA_ARGS]
+    source:
+      git: https://github.com/comfyanonymous/ComfyUI
+      ref: "{version}"
+      build:
+        commands:
+          - [uv, venv, --python, "3.11", .venv]
+          - [.venv/bin/pip, install, torch, torchvision, torchaudio, --index-url, "{torch_index}"]
+          - [.venv/bin/pip, install, -r, requirements.txt]
+    version: { type: github-release, repo: comfyanonymous/ComfyUI }
+    service:
+      command: ["{app_dir}/src/.venv/bin/python", "main.py", "--listen", "127.0.0.1", "--port", "8188"]
+      health_url: "http://127.0.0.1:8188/system_stats"
+    uninstall: { keep_paths: ["{app_dir}/models"] }
 ```
 
 Rules:
 
 - `{torch_index}` and similar variables are filled by the resolver from the GPU probe
   (CUDA version → PyTorch index URL, ROCm, MPS, CPU).
-- `when` clauses are **hard constraints**; `prefer` is a tie-breaker score.
-- Every method must declare `uninstall` and `prerequisites`; nothing is inferred.
-- Recipes are versioned; an installed app records the recipe version it used.
+- `when` clauses are **hard constraints**; `prefer` is a score. Methods are tried in score order;
+  source builds are the fallback, not the default.
+- Every method must declare its version source, uninstall behavior, and prerequisites; nothing is
+  inferred.
+- Before installing, probe for existing copies across methods (PATH binary, package manager,
+  container, version directory) and never create a second unmanaged copy.
+- Methods that require elevation, run an unpinned script, or build from a moving branch are ranked
+  lower and require an explicit advanced opt-in.
+- Recipes are versioned; an installed app records the recipe version and the chosen method.
 
 Catalog handling: a bundled snapshot for offline/first run, refreshed from a signed remote index
 (ed25519/minisign) with a pinned public key. New catalog versions can add apps and fix recipes
@@ -167,9 +191,11 @@ struct InstallPlan {
 }
 ```
 
-Scoring = hard-filter on `when` → weight preference (user choice: isolated vs system), maintenance
-cost, download size, and expected success. Unit-testable with fixture profiles; no network or
-shell calls in the resolver.
+Scoring = hard-filter on `when` (OS/arch, GPU/runtime, toolchain, elevation policy, disk) → score
+by upstream support, isolation and clean uninstall, version determinism, update path, download or
+build cost, and service manageability. Source builds score low unless no other method exists.
+Unit-testable with fixture profiles; no network or shell calls in the resolver. See the preference
+tiers in [install-methods.md](install-methods.md#4-scoring-model).
 
 The UI always shows the chosen method, a one-line "why", and the rejected alternatives before
 the user confirms.

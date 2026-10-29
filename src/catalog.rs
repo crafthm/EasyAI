@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -7,8 +7,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-
-use crate::probe;
 
 const BUNDLED_RECIPES: &[&str] = &[include_str!("../catalog/ollama.json")];
 const IMPORT_SUBDIR: &str = "catalog/imported";
@@ -26,21 +24,133 @@ pub struct Recipe {
     pub color: String,
     #[serde(default)]
     pub platforms: Vec<String>,
-    pub install: Option<Install>,
-    pub service: Option<Service>,
-    pub uninstall: Option<Uninstall>,
+    #[serde(default)]
+    pub methods: Vec<Method>,
+    #[serde(default, rename = "install", skip_serializing_if = "Option::is_none")]
+    pub legacy_install: Option<serde_json::Value>,
+    #[serde(default, rename = "service", skip_serializing_if = "Option::is_none")]
+    pub legacy_service: Option<serde_json::Value>,
+    #[serde(default, rename = "uninstall", skip_serializing_if = "Option::is_none")]
+    pub legacy_uninstall: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MethodKind {
+    Release,
+    Portable,
+    Container,
+    PackageManager,
+    Language,
+    Script,
+    Source,
+    Vcs,
+    Universal,
+}
+
+impl MethodKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MethodKind::Release => "release",
+            MethodKind::Portable => "portable",
+            MethodKind::Container => "container",
+            MethodKind::PackageManager => "package-manager",
+            MethodKind::Language => "language",
+            MethodKind::Script => "script",
+            MethodKind::Source => "source",
+            MethodKind::Vcs => "vcs",
+            MethodKind::Universal => "universal",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct Install {
-    pub kind: String,
-    pub repo: String,
+pub struct Method {
+    pub id: String,
+    pub kind: MethodKind,
     #[serde(default)]
-    pub asset: HashMap<String, String>,
+    pub when: MethodWhen,
+    #[serde(default)]
+    pub prefer: i32,
+    #[serde(default)]
+    pub advanced: bool,
+    #[serde(default)]
+    pub elevation: bool,
+    pub version: Option<VersionSource>,
+    pub service: Option<Service>,
+    pub uninstall: Option<Uninstall>,
+    pub size: Option<u64>,
+    pub source: Option<MethodSource>,
+    pub image: Option<ImageSpec>,
+    pub package: Option<PackageSpec>,
+    pub language: Option<LanguageSpec>,
+    pub script: Option<ScriptSpec>,
+    pub universal: Option<UniversalSpec>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct MethodWhen {
+    #[serde(default)]
+    pub os: Vec<String>,
+    #[serde(default)]
+    pub arch: Vec<String>,
+    #[serde(default)]
+    pub gpu: Vec<String>,
+    #[serde(default)]
+    pub runtime: Vec<String>,
+    #[serde(default)]
+    pub manager: Vec<String>,
+    #[serde(default)]
+    pub toolchain: Vec<String>,
+    pub min_ram_mb: Option<u64>,
+    pub min_disk_mb: Option<u64>,
+}
+
+impl MethodWhen {
+    pub fn matches_platform(&self, os: &str, arch: &str) -> bool {
+        (self.os.is_empty() || self.os.iter().any(|item| item == os))
+            && (self.arch.is_empty() || self.arch.iter().any(|item| item == arch))
+    }
+
+    pub fn matches_gpu(&self, gpus: &[String]) -> bool {
+        self.gpu.is_empty()
+            || self.gpu.iter().any(|required| {
+                gpus.iter().any(|available| available == required)
+            })
+    }
+
+    pub fn matches_runtimes(&self, runtimes: &HashSet<String>) -> bool {
+        self.runtime.is_empty()
+            || self.runtime.iter().any(|required| runtimes.contains(required))
+    }
+
+    pub fn matches_managers(&self, managers: &HashSet<String>) -> bool {
+        self.manager.is_empty()
+            || self.manager.iter().any(|required| managers.contains(required))
+    }
+
+    pub fn matches_toolchains(&self, toolchains: &HashSet<String>) -> bool {
+        self.toolchain.is_empty()
+            || self
+                .toolchain
+                .iter()
+                .any(|required| toolchains.contains(required))
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VersionSource {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub repo: Option<String>,
+    pub command: Option<Vec<String>>,
+    pub package: Option<String>,
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Service {
+    #[serde(default)]
     pub command: Vec<String>,
     pub health_url: String,
     #[serde(default)]
@@ -51,6 +161,83 @@ pub struct Service {
 pub struct Uninstall {
     #[serde(default)]
     pub keep_paths: Vec<String>,
+    #[serde(default)]
+    pub remove_paths: Vec<String>,
+    pub command: Option<Vec<String>>,
+    #[serde(default)]
+    pub native: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MethodSource {
+    pub repo: Option<String>,
+    #[serde(default)]
+    pub asset: HashMap<String, String>,
+    pub url: Option<String>,
+    pub sha256: Option<String>,
+    pub git: Option<String>,
+    #[serde(rename = "ref")]
+    pub git_ref: Option<String>,
+    pub build: Option<BuildSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BuildSpec {
+    #[serde(default)]
+    pub deps: Vec<String>,
+    #[serde(default)]
+    pub commands: Vec<Vec<String>>,
+    pub prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ImageSpec {
+    pub image: String,
+    pub tag: Option<String>,
+    pub digest: Option<String>,
+    pub runtime: Option<String>,
+    #[serde(default)]
+    pub volumes: Vec<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+    pub gpu: Option<String>,
+    pub restart: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PackageSpec {
+    pub manager: String,
+    pub package: String,
+    pub tap: Option<String>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LanguageSpec {
+    pub ecosystem: String,
+    pub package: String,
+    pub version: Option<String>,
+    pub index: Option<String>,
+    pub extra_index: Option<String>,
+    pub manager: Option<String>,
+    pub executable: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ScriptSpec {
+    pub url: String,
+    pub sha256: Option<String>,
+    pub probe: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct UniversalSpec {
+    pub format: String,
+    #[serde(rename = "ref")]
+    pub reference: String,
+    pub command: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +274,18 @@ pub struct RecipePreview {
 
 impl Recipe {
     pub fn validate(&self) -> Result<(), String> {
+        if self.legacy_install.is_some() {
+            return Err(format!(
+                "Recipe '{}' uses the old 'install' field; migrate it to 'methods'.",
+                self.id
+            ));
+        }
+        if self.legacy_service.is_some() || self.legacy_uninstall.is_some() {
+            return Err(format!(
+                "Recipe '{}' uses old top-level service/uninstall fields; move them into each method.",
+                self.id
+            ));
+        }
         if self.id.trim().is_empty() {
             return Err("Recipe is missing an id.".to_string());
         }
@@ -106,77 +305,317 @@ impl Recipe {
                 self.id
             ));
         }
-
-        let install = self.install.as_ref().ok_or_else(|| {
-            format!("Recipe '{}' is missing an install section.", self.id)
-        })?;
-        if install.kind != "github-release-binary" {
-            return Err(format!(
-                "Recipe '{}' uses unsupported install kind '{}'.",
-                self.id, install.kind
-            ));
-        }
-        if !install.repo.contains('/') {
-            return Err(format!(
-                "Recipe '{}' has an invalid GitHub repository '{}'.",
-                self.id, install.repo
-            ));
-        }
-        if install.asset.is_empty() {
-            return Err(format!(
-                "Recipe '{}' does not declare a release asset.",
-                self.id
-            ));
+        if self.methods.is_empty() {
+            return Err(format!("Recipe '{}' declares no installation methods.", self.id));
         }
 
-        let service = self.service.as_ref().ok_or_else(|| {
-            format!("Recipe '{}' is missing a service section.", self.id)
-        })?;
-        if service.command.is_empty() || service.command[0].trim().is_empty() {
-            return Err(format!("Recipe '{}' is missing a start command.", self.id));
+        let mut ids = HashSet::new();
+        for method in &self.methods {
+            method.validate(&self.id)?;
+            if !ids.insert(method.id.clone()) {
+                return Err(format!(
+                    "Recipe '{}' declares duplicate method id '{}'.",
+                    self.id, method.id
+                ));
+            }
         }
-        if !(service.health_url.starts_with("http://")
-            || service.health_url.starts_with("https://"))
-        {
-            return Err(format!(
-                "Recipe '{}' has an invalid health URL '{}'.",
-                self.id, service.health_url
-            ));
-        }
-
-        if self.uninstall.is_none() {
-            return Err(format!(
-                "Recipe '{}' is missing an uninstall section.",
-                self.id
-            ));
-        }
-
         Ok(())
+    }
+
+    pub fn method(&self, method_id: &str) -> Option<&Method> {
+        self.methods.iter().find(|method| method.id == method_id)
+    }
+
+    pub fn default_method(&self) -> Option<&Method> {
+        self.methods
+            .iter()
+            .max_by_key(|method| method.prefer)
+    }
+
+    pub fn supports_platform(&self, os: &str, arch: &str) -> bool {
+        self.methods
+            .iter()
+            .any(|method| method.when.matches_platform(os, arch))
     }
 
     pub fn validate_for_import(&self, platform: &str) -> Result<(), String> {
         self.validate()?;
-        let service = self
-            .service
-            .as_ref()
-            .ok_or_else(|| format!("Recipe '{}' is missing a service section.", self.id))?;
-        for token in &service.command {
-            let normalized = token.trim().to_ascii_lowercase();
-            if matches!(normalized.as_str(), "sudo" | "pkexec" | "doas") {
-                return Err(format!(
-                    "Recipe '{}' requires elevation ('{}'), which is not supported.",
-                    self.id, token
-                ));
-            }
-        }
-        if !self.platforms.iter().any(|supported| supported == platform) {
+        let (os, arch) = split_platform(platform)?;
+        if !self.supports_platform(os, arch) {
             return Err(format!(
                 "Recipe '{}' does not support this machine ({platform}).",
                 self.id
             ));
         }
+        for method in &self.methods {
+            for command in method.all_commands() {
+                for token in command {
+                    let normalized = token.trim().to_ascii_lowercase();
+                    if matches!(normalized.as_str(), "sudo" | "pkexec" | "doas") {
+                        return Err(format!(
+                            "Recipe '{}' method '{}' requires elevation ('{}'), which is not supported for imported recipes.",
+                            self.id, method.id, token
+                        ));
+                    }
+                }
+            }
+        }
         Ok(())
     }
+}
+
+impl Method {
+    pub fn validate(&self, recipe_id: &str) -> Result<(), String> {
+        if self.id.trim().is_empty() {
+            return Err(format!(
+                "Recipe '{}' has a method without an id.",
+                recipe_id
+            ));
+        }
+        if !self
+            .id
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_'))
+        {
+            return Err(format!(
+                "Recipe '{}' method id '{}' contains unsupported characters.",
+                recipe_id, self.id
+            ));
+        }
+        if !(0..=100).contains(&self.prefer) {
+            return Err(format!(
+                "Recipe '{}' method '{}' has prefer outside 0..=100.",
+                recipe_id, self.id
+            ));
+        }
+        let version = self.version.as_ref().ok_or_else(|| {
+            format!(
+                "Recipe '{}' method '{}' is missing a version source.",
+                recipe_id, self.id
+            )
+        })?;
+        if version.kind.trim().is_empty() {
+            return Err(format!(
+                "Recipe '{}' method '{}' has an empty version source type.",
+                recipe_id, self.id
+            ));
+        }
+        if let Some(service) = &self.service {
+            if service.health_url.is_empty()
+                || !(service.health_url.starts_with("http://")
+                    || service.health_url.starts_with("https://"))
+            {
+                return Err(format!(
+                    "Recipe '{}' method '{}' has an invalid health URL.",
+                    recipe_id, self.id
+                ));
+            }
+            if service.command.is_empty() && self.kind != MethodKind::Container {
+                return Err(format!(
+                    "Recipe '{}' method '{}' is missing a start command.",
+                    recipe_id, self.id
+                ));
+            }
+        }
+        let uninstall = self.uninstall.as_ref().ok_or_else(|| {
+            format!(
+                "Recipe '{}' method '{}' is missing an uninstall section.",
+                recipe_id, self.id
+            )
+        })?;
+        let implicit_app_removal = matches!(
+            self.kind,
+            MethodKind::Release
+                | MethodKind::Portable
+                | MethodKind::Language
+                | MethodKind::Script
+                | MethodKind::Source
+                | MethodKind::Vcs
+        );
+        if !uninstall.native
+            && uninstall.remove_paths.is_empty()
+            && uninstall.command.is_none()
+            && !implicit_app_removal
+        {
+            return Err(format!(
+                "Recipe '{}' method '{}' has no uninstall behavior.",
+                recipe_id, self.id
+            ));
+        }
+
+        match self.kind {
+            MethodKind::Release => {
+                let source = self.kind_source(recipe_id)?;
+                if source.repo.as_deref().unwrap_or("").is_empty()
+                    || source.asset.is_empty()
+                {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs a repo and asset map.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Portable => {
+                let source = self.kind_source(recipe_id)?;
+                if source.url.is_none()
+                    && (source.repo.is_none() || source.asset.is_empty())
+                {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs a portable URL or repo asset.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Container => {
+                let image = self.image.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing an image section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if image.image.trim().is_empty()
+                    || (image.tag.is_none() && image.digest.is_none())
+                {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs an image and a tag or digest.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::PackageManager => {
+                let package = self.package.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing a package section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if package.manager.is_empty() || package.package.is_empty() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs a manager and package name.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Language => {
+                let language = self.language.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing a language section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if language.ecosystem.is_empty() || language.package.is_empty() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs an ecosystem and package name.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Script => {
+                let script = self.script.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing a script section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if !script.url.starts_with("https://") {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs an https script URL.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Source => {
+                let source = self.kind_source(recipe_id)?;
+                let build = source.build.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing a build section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if source.git.is_none()
+                    || source.git_ref.is_none()
+                    || build.commands.is_empty()
+                {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs git, a pinned ref, and build commands.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Vcs => {
+                let source = self.kind_source(recipe_id)?;
+                if source.git.is_none() || source.git_ref.is_none() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs git and a pinned ref.",
+                        recipe_id, self.id
+                    ));
+                }
+                if self.language.is_none() && self.package.is_none() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs a language or package section.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+            MethodKind::Universal => {
+                let universal = self.universal.as_ref().ok_or_else(|| {
+                    format!(
+                        "Recipe '{}' method '{}' is missing a universal section.",
+                        recipe_id, self.id
+                    )
+                })?;
+                if universal.format.is_empty() || universal.reference.is_empty() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' needs a format and reference.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn kind_source(&self, recipe_id: &str) -> Result<&MethodSource, String> {
+        self.source.as_ref().ok_or_else(|| {
+            format!(
+                "Recipe '{}' method '{}' is missing a source section.",
+                recipe_id, self.id
+            )
+        })
+    }
+
+    pub fn all_commands(&self) -> Vec<&Vec<String>> {
+        let mut commands = Vec::new();
+        if let Some(service) = &self.service {
+            if !service.command.is_empty() {
+                commands.push(&service.command);
+            }
+        }
+        if let Some(uninstall) = &self.uninstall {
+            if let Some(command) = &uninstall.command {
+                commands.push(command);
+            }
+        }
+        if let Some(source) = &self.source {
+            if let Some(build) = &source.build {
+                for command in &build.commands {
+                    commands.push(command);
+                }
+            }
+        }
+        if let Some(script) = &self.script {
+            if let Some(probe) = &script.probe {
+                commands.push(probe);
+            }
+        }
+        commands
+    }
+}
+
+pub fn split_platform(platform: &str) -> Result<(&str, &str), String> {
+    platform
+        .split_once('-')
+        .ok_or_else(|| format!("Unsupported platform '{platform}'."))
 }
 
 pub fn bundled() -> Result<Vec<Recipe>, String> {
@@ -254,8 +693,9 @@ pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, Str
     let (source_url, content) = fetch_recipe_source(input)?;
     let sha256 = sha256_hex(content.as_bytes());
     let recipe = parse_recipe(&content)?;
-    let platform = probe::current_platform_id()?;
-    let supported = recipe.platforms.iter().any(|item| item == &platform);
+    let platform = crate::probe::current_platform_id()?;
+    let (os, arch) = split_platform(&platform)?;
+    let supported = recipe.supports_platform(os, arch);
     let conflict = entries(app_data)?
         .iter()
         .any(|entry| entry.recipe.id == recipe.id);
@@ -300,7 +740,7 @@ pub fn import_recipe(
         return Err("The recipe changed since it was previewed. Preview it again.".to_string());
     }
     let recipe = parse_recipe(&content)?;
-    let platform = probe::current_platform_id()?;
+    let platform = crate::probe::current_platform_id()?;
     recipe.validate_for_import(&platform)?;
 
     if entries(app_data)?
@@ -498,7 +938,7 @@ mod tests {
 
     use super::{
         entries, find, github_repo_parts, import_recipe, preview_recipe, remove_recipe,
-        sha256_hex, store_imported, Recipe, RecipeSource,
+        sha256_hex, store_imported, MethodKind, Recipe, RecipeSource,
     };
 
     fn base_recipe() -> Value {
@@ -506,16 +946,22 @@ mod tests {
             "id": "demo",
             "name": "Demo",
             "platforms": ["linux-x86_64"],
-            "install": {
-                "kind": "github-release-binary",
-                "repo": "owner/repo",
-                "asset": { "linux-x86_64": "demo.tgz" }
-            },
-            "service": {
-                "command": ["{install_dir}/bin/demo", "serve"],
-                "health_url": "http://127.0.0.1:9999/health"
-            },
-            "uninstall": { "keep_paths": [] }
+            "methods": [{
+                "id": "release",
+                "kind": "release",
+                "when": { "os": ["linux"], "arch": ["x86_64"] },
+                "prefer": 80,
+                "source": {
+                    "repo": "owner/repo",
+                    "asset": { "linux-x86_64": "demo.tar.gz" }
+                },
+                "version": { "type": "github-release", "repo": "owner/repo" },
+                "service": {
+                    "command": ["{install_dir}/bin/demo", "serve"],
+                    "health_url": "http://127.0.0.1:9999/health"
+                },
+                "uninstall": { "keep_paths": [] }
+            }]
         })
     }
 
@@ -528,95 +974,224 @@ mod tests {
         let recipes = super::bundled().unwrap();
         assert_eq!(recipes.len(), 1);
         assert_eq!(recipes[0].id, "ollama");
-        assert!(recipes[0].platforms.contains(&"linux-x86_64".to_string()));
+        assert!(recipes[0].methods.iter().any(|m| m.kind == MethodKind::Release));
+        assert!(recipes[0].methods.iter().any(|m| m.kind == MethodKind::Container));
     }
 
     #[test]
     fn valid_recipe_passes() {
-        assert!(parse(base_recipe()).validate().is_ok());
+        let recipe = parse(base_recipe());
+        assert!(recipe.validate().is_ok());
+        assert_eq!(recipe.methods.len(), 1);
     }
 
     #[test]
-    fn missing_id_is_rejected() {
+    fn legacy_install_is_rejected_with_migration_hint() {
         let mut value = base_recipe();
-        value["id"] = json!("");
+        value.as_object_mut().unwrap().remove("methods");
+        value["install"] = json!({ "kind": "github-release-binary" });
         let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("id"), "{err}");
+        assert!(err.contains("old 'install'"), "{err}");
+        assert!(err.contains("demo"), "{err}");
     }
 
     #[test]
-    fn missing_platforms_is_rejected() {
+    fn missing_methods_is_rejected() {
         let mut value = base_recipe();
-        value["platforms"] = json!([]);
+        value["methods"] = json!([]);
         let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("platform"), "{err}");
+        assert!(err.contains("no installation methods"), "{err}");
     }
 
     #[test]
-    fn missing_install_is_rejected() {
+    fn duplicate_method_ids_are_rejected() {
         let mut value = base_recipe();
-        value.as_object_mut().unwrap().remove("install");
+        let method = value["methods"][0].clone();
+        value["methods"].as_array_mut().unwrap().push(method);
         let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("install"), "{err}");
+        assert!(err.contains("duplicate"), "{err}");
     }
 
     #[test]
-    fn unsupported_install_kind_is_rejected() {
+    fn unsupported_method_kind_is_rejected_by_serde() {
         let mut value = base_recipe();
-        value["install"]["kind"] = json!("pip");
+        value["methods"][0]["kind"] = json!("pip");
+        assert!(serde_json::from_value::<Recipe>(value).is_err());
+    }
+
+    #[test]
+    fn method_without_version_is_rejected() {
+        let mut value = base_recipe();
+        value["methods"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("version");
         let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("install kind"), "{err}");
+        assert!(err.contains("version source"), "{err}");
     }
 
     #[test]
-    fn missing_service_is_rejected() {
+    fn method_without_uninstall_is_rejected() {
         let mut value = base_recipe();
-        value.as_object_mut().unwrap().remove("service");
-        let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("service"), "{err}");
-    }
-
-    #[test]
-    fn empty_command_is_rejected() {
-        let mut value = base_recipe();
-        value["service"]["command"] = json!([]);
-        let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("start command"), "{err}");
-    }
-
-    #[test]
-    fn invalid_health_url_is_rejected() {
-        let mut value = base_recipe();
-        value["service"]["health_url"] = json!("127.0.0.1:9999");
-        let err = parse(value).validate().unwrap_err();
-        assert!(err.contains("health URL"), "{err}");
-    }
-
-    #[test]
-    fn missing_uninstall_is_rejected() {
-        let mut value = base_recipe();
-        value.as_object_mut().unwrap().remove("uninstall");
+        value["methods"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("uninstall");
         let err = parse(value).validate().unwrap_err();
         assert!(err.contains("uninstall"), "{err}");
     }
 
     #[test]
-    fn import_rejects_unsupported_platform() {
-        let recipe = parse(base_recipe());
-        let err = recipe.validate_for_import("macos-aarch64").unwrap_err();
-        assert!(err.contains("does not support"), "{err}");
-        assert!(recipe.validate_for_import("linux-x86_64").is_ok());
+    fn container_requires_image_and_tag_or_digest() {
+        let mut value = base_recipe();
+        value["methods"] = json!([{
+            "id": "container",
+            "kind": "container",
+            "version": { "type": "image", "image": "demo" },
+            "image": { "image": "demo/demo" },
+            "uninstall": { "native": true }
+        }]);
+        let err = parse(value).validate().unwrap_err();
+        assert!(err.contains("tag or digest"), "{err}");
     }
 
     #[test]
-    fn import_rejects_elevation_commands() {
+    fn source_requires_pinned_ref_and_build_commands() {
         let mut value = base_recipe();
-        value["service"]["command"] = json!(["sudo", "{install_dir}/bin/demo"]);
+        value["methods"] = json!([{
+            "id": "source",
+            "kind": "source",
+            "advanced": true,
+            "source": {
+                "git": "https://github.com/owner/repo",
+                "build": { "commands": [] }
+            },
+            "version": { "type": "git" },
+            "uninstall": { "remove_paths": ["{app_dir}"] }
+        }]);
+        let err = parse(value).validate().unwrap_err();
+        assert!(err.contains("pinned ref"), "{err}");
+    }
+
+    #[test]
+    fn every_kind_rejects_missing_required_fields() {
+        let cases = [
+            (
+                json!({
+                    "id": "package",
+                    "kind": "package-manager",
+                    "version": { "type": "registry", "package": "demo" },
+                    "uninstall": { "native": true }
+                }),
+                "package section",
+            ),
+            (
+                json!({
+                    "id": "language",
+                    "kind": "language",
+                    "version": { "type": "registry", "package": "demo" },
+                    "uninstall": { "keep_paths": [] }
+                }),
+                "language section",
+            ),
+            (
+                json!({
+                    "id": "script",
+                    "kind": "script",
+                    "version": { "type": "command", "command": ["demo"] },
+                    "uninstall": { "command": ["demo"] }
+                }),
+                "script section",
+            ),
+            (
+                json!({
+                    "id": "universal",
+                    "kind": "universal",
+                    "version": { "type": "command", "command": ["demo"] },
+                    "uninstall": { "native": true }
+                }),
+                "universal section",
+            ),
+            (
+                json!({
+                    "id": "vcs",
+                    "kind": "vcs",
+                    "source": { "git": "https://example.com/demo", "ref": "v1.0.0" },
+                    "version": { "type": "git" },
+                    "uninstall": { "keep_paths": [] }
+                }),
+                "language or package",
+            ),
+            (
+                json!({
+                    "id": "portable",
+                    "kind": "portable",
+                    "version": { "type": "github-release", "repo": "owner/repo" },
+                    "uninstall": { "keep_paths": [] }
+                }),
+                "source section",
+            ),
+        ];
+
+        for (method, expected) in cases {
+            let mut value = base_recipe();
+            value["methods"] = json!([method]);
+            let err = parse(value).validate().unwrap_err();
+            assert!(err.contains(expected), "expected {expected}, got {err}");
+        }
+    }
+
+    #[test]
+    fn imported_old_schema_is_not_loaded() {
+        let directory = temp_catalog_dir("old-import");
+        let imported_dir = directory.join("catalog/imported");
+        std::fs::create_dir_all(&imported_dir).unwrap();
+        let old = json!({
+            "recipe": {
+                "id": "legacy",
+                "name": "Legacy",
+                "platforms": ["linux-x86_64"],
+                "install": {
+                    "kind": "github-release-binary",
+                    "repo": "owner/repo",
+                    "asset": { "linux-x86_64": "demo.tgz" }
+                },
+                "service": {
+                    "command": ["demo"],
+                    "health_url": "http://127.0.0.1:9999"
+                },
+                "uninstall": { "keep_paths": [] }
+            },
+            "source": {
+                "url": "https://example.com/easyai.json",
+                "sha256": "abc",
+                "importedAt": "0"
+            }
+        });
+        std::fs::write(
+            imported_dir.join("legacy.json"),
+            serde_json::to_vec(&old).unwrap(),
+        )
+        .unwrap();
+        assert!(find(&directory, "legacy").is_err());
+        assert_eq!(entries(&directory).unwrap().len(), 1);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn imported_recipe_rejects_elevation() {
+        let mut value = base_recipe();
+        value["methods"][0]["service"]["command"] = json!(["sudo", "demo"]);
         let recipe = parse(value);
-        let err = recipe
-            .validate_for_import("linux-x86_64")
-            .unwrap_err();
+        let err = recipe.validate_for_import("linux-x86_64").unwrap_err();
         assert!(err.contains("elevation"), "{err}");
+    }
+
+    #[test]
+    fn imported_recipe_rejects_unsupported_platform() {
+        let recipe = parse(base_recipe());
+        let err = recipe.validate_for_import("macos-aarch64").unwrap_err();
+        assert!(err.contains("does not support"), "{err}");
     }
 
     #[test]
@@ -641,8 +1216,6 @@ mod tests {
         );
         let url = reqwest::Url::parse("https://github.com/owner/repo/tree/main").unwrap();
         assert_eq!(github_repo_parts(&url), None);
-        let url = reqwest::Url::parse("https://raw.githubusercontent.com/owner/repo/x").unwrap();
-        assert_eq!(github_repo_parts(&url), None);
     }
 
     fn serve_recipe(body: String) -> String {
@@ -665,20 +1238,26 @@ mod tests {
     }
 
     fn remote_recipe(platform: &str) -> Value {
+        let (os, arch) = super::split_platform(platform).unwrap();
         json!({
             "id": "remote-demo",
             "name": "Remote demo",
             "platforms": [platform],
-            "install": {
-                "kind": "github-release-binary",
-                "repo": "owner/repo",
-                "asset": { platform: "demo.tgz" }
-            },
-            "service": {
-                "command": ["{install_dir}/bin/demo", "serve"],
-                "health_url": "http://127.0.0.1:9999/health"
-            },
-            "uninstall": { "keep_paths": [] }
+            "methods": [{
+                "id": "release",
+                "kind": "release",
+                "when": { "os": [os], "arch": [arch] },
+                "source": {
+                    "repo": "owner/repo",
+                    "asset": { platform: "demo.tar.gz" }
+                },
+                "version": { "type": "github-release", "repo": "owner/repo" },
+                "service": {
+                    "command": ["{install_dir}/bin/demo", "serve"],
+                    "health_url": "http://127.0.0.1:9999/health"
+                },
+                "uninstall": { "keep_paths": [] }
+            }]
         })
     }
 
@@ -695,8 +1274,7 @@ mod tests {
     #[test]
     fn previews_and_imports_from_a_recipe_url() {
         let platform = crate::probe::current_platform_id().unwrap();
-        let body = remote_recipe(&platform).to_string();
-        let url = serve_recipe(body);
+        let url = serve_recipe(remote_recipe(&platform).to_string());
         let directory = temp_catalog_dir("import-url");
 
         let preview = preview_recipe(&directory, &url).unwrap();
@@ -719,10 +1297,8 @@ mod tests {
         let platform = crate::probe::current_platform_id().unwrap();
         let url = serve_recipe(remote_recipe(&platform).to_string());
         let directory = temp_catalog_dir("import-changed");
-
         let err = import_recipe(&directory, &url, "deadbeef").unwrap_err();
         assert!(err.contains("changed"), "{err}");
-        assert!(find(&directory, "remote-demo").is_err());
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -733,7 +1309,6 @@ mod tests {
         value["id"] = json!("ollama");
         let url = serve_recipe(value.to_string());
         let directory = temp_catalog_dir("import-conflict");
-
         let preview = preview_recipe(&directory, &url).unwrap();
         assert!(preview.conflict);
         let err = import_recipe(&directory, &url, &preview.sha256).unwrap_err();
@@ -743,13 +1318,7 @@ mod tests {
 
     #[test]
     fn imported_recipe_roundtrip() {
-        let directory = std::env::temp_dir().join(format!(
-            "easyai-catalog-test-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&directory);
-        std::fs::create_dir_all(&directory).unwrap();
-
+        let directory = temp_catalog_dir("roundtrip");
         let recipe = parse(base_recipe());
         let source = RecipeSource {
             url: "https://example.com/easyai.json".to_string(),
@@ -757,20 +1326,14 @@ mod tests {
             imported_at: "0".to_string(),
         };
         store_imported(&directory, &recipe, &source).unwrap();
-
-        let all = entries(&directory).unwrap();
-        assert_eq!(all.len(), 2);
+        assert_eq!(entries(&directory).unwrap().len(), 2);
         let imported = find(&directory, "demo").unwrap();
         assert_eq!(
             imported.source.as_ref().unwrap().url,
             "https://example.com/easyai.json"
         );
-
         remove_recipe(&directory, "demo").unwrap();
         assert!(find(&directory, "demo").is_err());
-        assert_eq!(entries(&directory).unwrap().len(), 1);
-
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }
-

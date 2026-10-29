@@ -22,10 +22,23 @@ pub const TOOLS: &[ToolSpec] = &[
         inputs: &["app_id"],
     },
     ToolSpec {
+        name: "plan_install",
+        description: "Resolve the installation method and show the plan without changing the machine.",
+        mutating: false,
+        inputs: &["app_id", "method_id", "allow_advanced", "allow_elevation"],
+    },
+    ToolSpec {
         name: "install_app",
-        description: "Install an application from its recipe.",
+        description: "Install an application using the selected method.",
         mutating: true,
-        inputs: &["app_id", "origin", "confirmed"],
+        inputs: &[
+            "app_id",
+            "method_id",
+            "allow_advanced",
+            "allow_elevation",
+            "origin",
+            "confirmed",
+        ],
     },
     ToolSpec {
         name: "start_app",
@@ -50,6 +63,24 @@ pub const TOOLS: &[ToolSpec] = &[
         description: "List lifecycle jobs for an application.",
         mutating: false,
         inputs: &["app_id"],
+    },
+    ToolSpec {
+        name: "get_bom",
+        description: "Read the bill of materials for an installed application.",
+        mutating: false,
+        inputs: &["app_id"],
+    },
+    ToolSpec {
+        name: "get_method_settings",
+        description: "Read the install-tier priority settings.",
+        mutating: false,
+        inputs: &[],
+    },
+    ToolSpec {
+        name: "save_method_settings",
+        description: "Change the install-tier priority settings.",
+        mutating: true,
+        inputs: &["settings", "origin", "confirmed"],
     },
     ToolSpec {
         name: "get_job_log",
@@ -104,6 +135,7 @@ mod tests {
             "start_app",
             "stop_app",
             "uninstall_app",
+            "plan_install",
             "get_app_detail",
             "get_job_log",
             "preview_recipe",
