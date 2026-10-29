@@ -71,6 +71,12 @@ pub const TOOLS: &[ToolSpec] = &[
         inputs: &["app_id"],
     },
     ToolSpec {
+        name: "open_url",
+        description: "Open a URL declared by an application's usage section.",
+        mutating: false,
+        inputs: &["app_id", "url"],
+    },
+    ToolSpec {
         name: "get_method_settings",
         description: "Read the install-tier priority settings.",
         mutating: false,
@@ -141,6 +147,10 @@ mod tests {
             "preview_recipe",
             "import_recipe",
             "remove_recipe",
+            "open_url",
+            "get_bom",
+            "get_method_settings",
+            "save_method_settings",
         ] {
             assert!(spec(name).is_some(), "missing tool {name}");
         }

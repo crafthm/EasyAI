@@ -64,6 +64,7 @@ fn main() {
             commands::import_recipe,
             commands::remove_recipe,
             commands::get_bom,
+            commands::open_url,
             commands::get_method_settings,
             commands::save_method_settings,
             commands::list_tools

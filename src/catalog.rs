@@ -23,9 +23,13 @@ pub struct Recipe {
     #[serde(default)]
     pub color: String,
     #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
     pub methods: Vec<Method>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
     #[serde(default, rename = "install", skip_serializing_if = "Option::is_none")]
     pub legacy_install: Option<serde_json::Value>,
     #[serde(default, rename = "service", skip_serializing_if = "Option::is_none")]
@@ -135,6 +139,87 @@ impl MethodWhen {
                 .toolchain
                 .iter()
                 .any(|required| toolchains.contains(required))
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Usage {
+    pub ui_url: Option<String>,
+    pub api: Option<ApiUsage>,
+    pub docs_url: Option<String>,
+    #[serde(default)]
+    pub cli: Vec<CliUsage>,
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct ApiUsage {
+    pub base_url: Option<String>,
+    pub openai_base_url: Option<String>,
+    pub docs_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CliUsage {
+    pub label: String,
+    pub command: String,
+}
+
+impl Usage {
+    pub fn validate(&self, recipe_id: &str) -> Result<(), String> {
+        for (label, url) in self.urls_with_labels() {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(format!(
+                    "Recipe '{}' usage {label} has an invalid URL '{}'.",
+                    recipe_id, url
+                ));
+            }
+        }
+        for item in &self.cli {
+            if item.label.trim().is_empty() || item.command.trim().is_empty() {
+                return Err(format!(
+                    "Recipe '{}' has an empty usage CLI entry.",
+                    recipe_id
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn declares(&self, url: &str) -> bool {
+        self.declared_urls().iter().any(|declared| declared == url)
+    }
+
+    pub fn declared_urls(&self) -> Vec<String> {
+        let mut urls = Vec::new();
+        for (_, url) in self.urls_with_labels() {
+            if !urls.iter().any(|existing| existing == url) {
+                urls.push(url.to_string());
+            }
+        }
+        urls
+    }
+
+    fn urls_with_labels(&self) -> Vec<(&'static str, &str)> {
+        let mut urls = Vec::new();
+        if let Some(url) = &self.ui_url {
+            urls.push(("ui_url", url.as_str()));
+        }
+        if let Some(api) = &self.api {
+            if let Some(url) = &api.base_url {
+                urls.push(("api.base_url", url.as_str()));
+            }
+            if let Some(url) = &api.openai_base_url {
+                urls.push(("api.openai_base_url", url.as_str()));
+            }
+            if let Some(url) = &api.docs_url {
+                urls.push(("api.docs_url", url.as_str()));
+            }
+        }
+        if let Some(url) = &self.docs_url {
+            urls.push(("docs_url", url.as_str()));
+        }
+        urls
     }
 }
 
@@ -309,6 +394,17 @@ impl Recipe {
             return Err(format!("Recipe '{}' declares no installation methods.", self.id));
         }
 
+        if !self.icon.trim().is_empty() && !self.icon.trim().starts_with("https://") {
+            return Err(format!(
+                "Recipe '{}' icon must be an https:// URL.",
+                self.id
+            ));
+        }
+
+        if let Some(usage) = &self.usage {
+            usage.validate(&self.id)?;
+        }
+
         let mut ids = HashSet::new();
         for method in &self.methods {
             method.validate(&self.id)?;
@@ -330,6 +426,33 @@ impl Recipe {
         self.methods
             .iter()
             .max_by_key(|method| method.prefer)
+    }
+
+    /// The tile background: the recipe's own icon when declared, otherwise the
+    /// GitHub avatar of the repository the recipe came from.
+    pub fn icon_url(&self, source_url: Option<&str>) -> Option<String> {
+        let icon = self.icon.trim();
+        if !icon.is_empty() {
+            return Some(icon.to_string());
+        }
+        let owner = source_url
+            .and_then(github_url_owner)
+            .or_else(|| {
+                self.methods.iter().find_map(|method| {
+                    method
+                        .source
+                        .as_ref()
+                        .and_then(|source| source.repo.as_deref())
+                        .or_else(|| {
+                            method
+                                .version
+                                .as_ref()
+                                .and_then(|version| version.repo.as_deref())
+                        })
+                        .and_then(repo_slug_owner)
+                })
+            })?;
+        Some(format!("https://github.com/{owner}.png?size=200"))
     }
 
     pub fn supports_platform(&self, os: &str, arch: &str) -> bool {
@@ -879,6 +1002,24 @@ fn github_repo_parts(url: &reqwest::Url) -> Option<(String, String)> {
     Some((owner.to_string(), repo.to_string()))
 }
 
+fn github_url_owner(url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(url).ok()?;
+    let owner = match url.host_str()? {
+        "github.com" | "raw.githubusercontent.com" => url
+            .path_segments()?
+            .find(|segment| !segment.is_empty())?
+            .to_string(),
+        _ => return None,
+    };
+    is_valid_github_name(&owner).then_some(owner)
+}
+
+/// `owner/repo` as written in a recipe's `source` or `version` section.
+fn repo_slug_owner(slug: &str) -> Option<String> {
+    let (owner, repo) = slug.split_once('/')?;
+    (is_valid_github_name(owner) && is_valid_github_name(repo)).then(|| owner.to_string())
+}
+
 fn is_valid_github_name(name: &str) -> bool {
     !name.is_empty()
         && name != "."
@@ -976,6 +1117,14 @@ mod tests {
         assert_eq!(recipes[0].id, "ollama");
         assert!(recipes[0].methods.iter().any(|m| m.kind == MethodKind::Release));
         assert!(recipes[0].methods.iter().any(|m| m.kind == MethodKind::Container));
+        assert_eq!(
+            recipes[0].icon_url(None).as_deref(),
+            Some("https://github.com/ollama.png?size=200")
+        );
+        let usage = recipes[0].usage.as_ref().unwrap();
+        assert!(usage.declares("http://127.0.0.1:11434"));
+        assert!(usage.declares("http://127.0.0.1:11434/v1"));
+        assert_eq!(usage.cli.len(), 3);
     }
 
     #[test]
@@ -983,6 +1132,34 @@ mod tests {
         let recipe = parse(base_recipe());
         assert!(recipe.validate().is_ok());
         assert_eq!(recipe.methods.len(), 1);
+    }
+
+    #[test]
+    fn icon_resolves_from_recipe_icon_or_source_owner() {
+        let mut value = base_recipe();
+        let recipe = parse(value.clone());
+        assert_eq!(
+            recipe.icon_url(None).as_deref(),
+            Some("https://github.com/owner.png?size=200")
+        );
+        assert_eq!(
+            recipe
+                .icon_url(Some(
+                    "https://raw.githubusercontent.com/acme/demo/HEAD/easyai.json"
+                ))
+                .as_deref(),
+            Some("https://github.com/acme.png?size=200")
+        );
+
+        value["icon"] = json!("https://example.com/icon.png");
+        assert_eq!(
+            parse(value.clone()).icon_url(None).as_deref(),
+            Some("https://example.com/icon.png")
+        );
+
+        value["icon"] = json!("http://example.com/icon.png");
+        let err = parse(value).validate().unwrap_err();
+        assert!(err.contains("icon must be an https:// URL"), "{err}");
     }
 
     #[test]
@@ -1176,6 +1353,40 @@ mod tests {
         assert!(find(&directory, "legacy").is_err());
         assert_eq!(entries(&directory).unwrap().len(), 1);
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn usage_urls_are_validated_and_deduplicated() {
+        let mut value = base_recipe();
+        value["usage"] = json!({
+            "ui_url": "http://127.0.0.1:3000",
+            "api": {
+                "base_url": "http://127.0.0.1:11434",
+                "openai_base_url": "http://127.0.0.1:11434/v1",
+                "docs_url": "https://docs.example.com"
+            },
+            "docs_url": "https://docs.example.com",
+            "cli": [
+                { "label": "Run", "command": "demo run" }
+            ],
+            "notes": "Open the web UI."
+        });
+        let recipe = parse(value.clone());
+        recipe.validate().unwrap();
+        let urls = recipe.usage.as_ref().unwrap().declared_urls();
+        assert_eq!(urls.len(), 4);
+        assert!(urls.contains(&"http://127.0.0.1:3000".to_string()));
+        assert!(urls.contains(&"https://docs.example.com".to_string()));
+        assert!(recipe.usage.as_ref().unwrap().declares("http://127.0.0.1:11434"));
+        assert!(!recipe
+            .usage
+            .as_ref()
+            .unwrap()
+            .declares("https://example.com/other"));
+
+        value["usage"]["ui_url"] = json!("ftp://example.com");
+        let err = parse(value).validate().unwrap_err();
+        assert!(err.contains("invalid URL"), "{err}");
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
@@ -420,6 +421,48 @@ pub async fn remove_recipe(
     })
     .await
     .map_err(|err| format!("Failed to remove the recipe: {err}"))?
+}
+
+#[tauri::command]
+pub async fn open_url(
+    state: State<'_, AppState>,
+    app_id: String,
+    url: String,
+) -> Result<(), String> {
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let recipe = catalog::find(&app_data, &app_id)?.recipe;
+        let usage = recipe
+            .usage
+            .as_ref()
+            .ok_or_else(|| "This application declares no usage URLs.".to_string())?;
+        if !usage.declares(&url) {
+            return Err("This URL is not declared by the application's recipe.".to_string());
+        }
+        if !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err("Only http and https URLs can be opened.".to_string());
+        }
+        open_external(&url)
+    })
+    .await
+    .map_err(|err| format!("Failed to open the URL: {err}"))?
+}
+
+fn open_external(url: &str) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "start", ""]);
+        command
+    } else {
+        Command::new("xdg-open")
+    };
+    command
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("Could not open the URL: {err}"))
 }
 
 #[tauri::command]

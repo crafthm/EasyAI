@@ -18,6 +18,58 @@ export function PlusIcon() {
   )
 }
 
+export function DownloadIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 4v11m0 0 4-4m-4 4-4-4" />
+      <path d="M5 19h14" />
+    </svg>
+  )
+}
+
+export function PlayIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M7 5.5v13l11-6.5z" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function StopIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" stroke="none" />
+    </svg>
+  )
+}
+
+export function SpinnerIcon() {
+  return (
+    <svg {...iconProps} className="icon-spin">
+      <path d="M12 3a9 9 0 1 0 9 9" />
+    </svg>
+  )
+}
+
+export function AlertIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 4 3 20h18L12 4z" />
+      <path d="M12 10v4M12 17h.01" />
+    </svg>
+  )
+}
+
+export function ExternalIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M14 4h6v6" />
+      <path d="M20 4 11 13" />
+      <path d="M19 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h5" />
+    </svg>
+  )
+}
+
 export function GearIcon() {
   return (
     <svg {...iconProps}>

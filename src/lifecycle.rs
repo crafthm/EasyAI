@@ -19,6 +19,7 @@ pub struct AppSummary {
     pub description: String,
     pub glyph: String,
     pub color: String,
+    pub icon_url: Option<String>,
     pub state: String,
     pub version: Option<String>,
     pub managed: bool,
@@ -46,6 +47,7 @@ pub struct AppDetail {
     pub source_url: Option<String>,
     pub provenance_json: Option<String>,
     pub bom_path: Option<String>,
+    pub usage: Option<crate::catalog::Usage>,
 }
 
 pub fn list_apps(
@@ -115,12 +117,14 @@ fn list_apps_with(
                         None => ("not_installed".to_string(), None, true, None, None),
                     },
                 };
+            let icon_url = recipe.icon_url(source_url.as_deref());
             AppSummary {
                 id: recipe.id,
                 name: recipe.name,
                 description: recipe.description,
                 glyph: recipe.glyph,
                 color: recipe.color,
+                icon_url,
                 state,
                 version,
                 managed,
@@ -140,6 +144,7 @@ pub fn get_app_detail(
 ) -> Result<AppDetail, String> {
     let entry = crate::catalog::find(app_data, app_id)?;
     let source_url = entry.source.map(|source| source.url);
+    let usage = entry.recipe.usage.clone();
     let recipe = entry.recipe;
     let record = db::get_installed(db_path, app_id)
         .map_err(|err| format!("Failed to load application state: {err}"))?;
@@ -182,6 +187,7 @@ pub fn get_app_detail(
         source_url,
         provenance_json: record.as_ref().and_then(|app| app.provenance_json.clone()),
         bom_path: record.as_ref().and_then(|app| app.bom_path.clone()),
+        usage,
     })
 }
 
@@ -423,6 +429,59 @@ mod tests {
             reconcile(Some(&app), false, false),
             ("stopped".to_string(), true)
         );
+    }
+
+    #[test]
+    fn detail_exposes_usage_only_when_the_recipe_declares_it() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-usage-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        db::init(&path).unwrap();
+        let data_dir = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-usage-data-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let imported = data_dir.join("catalog/imported");
+        std::fs::create_dir_all(&imported).unwrap();
+        let recipe = serde_json::json!({
+            "id": "demo",
+            "name": "Demo",
+            "platforms": ["linux-x86_64"],
+            "methods": [{
+                "id": "release",
+                "kind": "release",
+                "when": { "os": ["linux"], "arch": ["x86_64"] },
+                "source": { "repo": "owner/repo", "asset": { "linux-x86_64": "demo.tar.gz" } },
+                "version": { "type": "github-release", "repo": "owner/repo" },
+                "service": { "command": ["demo"], "health_url": "http://127.0.0.1:9/health" },
+                "uninstall": { "keep_paths": [] }
+            }]
+        });
+        std::fs::write(
+            imported.join("demo.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "recipe": recipe,
+                "source": {
+                    "url": "https://example.com/demo.json",
+                    "sha256": "abc",
+                    "importedAt": "0"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let jobs = JobManager::new();
+        let ollama = super::get_app_detail(&path, &data_dir, &jobs, "ollama").unwrap();
+        assert!(ollama.usage.is_some());
+        let demo = super::get_app_detail(&path, &data_dir, &jobs, "demo").unwrap();
+        assert!(demo.usage.is_none());
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::remove_file(&path).unwrap();
     }
 
     #[test]

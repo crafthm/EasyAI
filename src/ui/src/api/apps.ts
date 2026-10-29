@@ -17,6 +17,7 @@ export type AppSummary = {
   description: string
   glyph: string
   color: string
+  iconUrl: string | null
   state: LifecycleState
   version: string | null
   managed: boolean
@@ -25,12 +26,32 @@ export type AppSummary = {
   methodKind: string | null
 }
 
-export type AppDetail = AppSummary & {
+export type UsageApi = {
+  base_url: string | null
+  openai_base_url: string | null
+  docs_url: string | null
+}
+
+export type UsageCli = {
+  label: string
+  command: string
+}
+
+export type Usage = {
+  ui_url: string | null
+  api: UsageApi | null
+  docs_url: string | null
+  cli: UsageCli[]
+  notes: string | null
+}
+
+export type AppDetail = Omit<AppSummary, 'iconUrl'> & {
   installDir: string | null
   method: string | null
   healthOk: boolean
   provenanceJson: string | null
   bomPath: string | null
+  usage: Usage | null
 }
 
 export type ExistingInstall = {
@@ -83,6 +104,7 @@ export type Recipe = {
   description: string
   glyph: string
   color: string
+  icon: string
   platforms: string[]
   install: RecipeInstall | null
   service: RecipeService | null
@@ -210,6 +232,15 @@ export function importRecipe(url: string, sha256: string): Promise<void> {
 export function removeRecipe(appId: string): Promise<void> {
   return invoke('remove_recipe', {
     appId,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function openUrl(appId: string, url: string): Promise<void> {
+  return invoke('open_url', {
+    appId,
+    url,
     origin: 'ui',
     confirmed: true,
   })

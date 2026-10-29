@@ -99,6 +99,7 @@ name: ComfyUI
 description: Node-based image generation
 glyph: C
 color: "linear-gradient(135deg, #f59e0b, #f97316)"
+icon: "https://example.com/comfyui-logo.png"
 platforms: [linux-x86_64, macos-aarch64, windows-x86_64]
 methods:
   - id: windows-portable-nvidia
@@ -267,6 +268,34 @@ URL and sha256, and behaves exactly like a bundled recipe afterwards. Import rul
 - the current platform must be supported;
 - recipes are never updated automatically, and can be removed from the catalog only while the
   application is not installed.
+
+#### 4.4.3 Usage guidance after startup
+
+A recipe may declare how to use the application after it starts. The detail panel renders this as
+a **Use** section; recipes without usage show no empty panel.
+
+```json
+"usage": {
+  "ui_url": "http://127.0.0.1:3000",
+  "api": {
+    "base_url": "http://127.0.0.1:11434",
+    "openai_base_url": "http://127.0.0.1:11434/v1",
+    "docs_url": "https://docs.ollama.com"
+  },
+  "docs_url": "https://docs.ollama.com",
+  "cli": [
+    { "label": "Pull a model", "command": "ollama pull llama3.2" },
+    { "label": "Run a model", "command": "ollama run llama3.2" }
+  ],
+  "notes": "Ollama is an API and CLI; pair it with a web UI for chat."
+}
+```
+
+- `ui_url` adds an **Open** action (disabled while the application is stopped).
+- API base and OpenAI-compatible base have Copy actions.
+- CLI examples are copyable; docs URLs open in the system browser.
+- `open_url(app_id, url)` only opens URLs declared by the recipe; arbitrary URLs are rejected.
+- Model listing/pulling, embedded terminals, and partner-app pairing are follow-up phases.
 
 ### 4.5 Versions and upgrades
 

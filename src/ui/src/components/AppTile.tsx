@@ -1,7 +1,19 @@
+import { useState } from 'react'
 import type { AppSummary } from '../api/apps'
 import { lifecycleLabel } from '../lifecycle'
+import {
+  AlertIcon,
+  DownloadIcon,
+  ExternalIcon,
+  PlayIcon,
+  SpinnerIcon,
+  StopIcon,
+} from './icons'
+
+type ActionIcon = 'install' | 'start' | 'stop' | 'external' | 'busy' | 'failed'
 
 type PrimaryAction = {
+  icon: ActionIcon
   label: string
   disabled: boolean
 }
@@ -9,23 +21,40 @@ type PrimaryAction = {
 function primaryAction(app: AppSummary): PrimaryAction {
   switch (app.state) {
     case 'not_installed':
-      return { label: 'Install', disabled: false }
+      return { icon: 'install', label: 'Install', disabled: false }
     case 'stopped':
-      return { label: 'Start', disabled: false }
+      return { icon: 'start', label: 'Start', disabled: false }
     case 'running':
       return app.managed
-        ? { label: 'Stop', disabled: false }
-        : { label: 'External', disabled: true }
+        ? { icon: 'stop', label: 'Stop', disabled: false }
+        : { icon: 'external', label: 'Running externally', disabled: true }
     case 'installing':
-      return { label: 'Installing…', disabled: true }
+      return { icon: 'busy', label: 'Installing', disabled: true }
     case 'starting':
-      return { label: 'Starting…', disabled: true }
+      return { icon: 'busy', label: 'Starting', disabled: true }
     case 'stopping':
-      return { label: 'Stopping…', disabled: true }
+      return { icon: 'busy', label: 'Stopping', disabled: true }
     case 'uninstalling':
-      return { label: 'Uninstalling…', disabled: true }
+      return { icon: 'busy', label: 'Uninstalling', disabled: true }
     case 'failed':
-      return { label: 'Failed', disabled: true }
+      return { icon: 'failed', label: 'Failed', disabled: true }
+  }
+}
+
+function ActionGlyph({ icon }: { icon: ActionIcon }) {
+  switch (icon) {
+    case 'install':
+      return <DownloadIcon />
+    case 'start':
+      return <PlayIcon />
+    case 'stop':
+      return <StopIcon />
+    case 'external':
+      return <ExternalIcon />
+    case 'busy':
+      return <SpinnerIcon />
+    case 'failed':
+      return <AlertIcon />
   }
 }
 
@@ -36,8 +65,10 @@ type Props = {
 }
 
 export function AppTile({ app, onOpen, onAction }: Props) {
+  const [logoFailed, setLogoFailed] = useState(false)
   const state = lifecycleLabel(app)
   const action = primaryAction(app)
+  const logo = logoFailed ? null : app.iconUrl
 
   return (
     <div
@@ -46,26 +77,36 @@ export function AppTile({ app, onOpen, onAction }: Props) {
         background: app.color || 'linear-gradient(135deg, #4b5563, #1f2937)',
       }}
     >
+      {logo && (
+        <img
+          className="app-tile-logo"
+          src={logo}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          onError={() => setLogoFailed(true)}
+        />
+      )}
+      <span className="app-tile-shade" aria-hidden="true" />
       <button
         type="button"
         className="app-tile-body"
         aria-label={`${app.name}, ${state}. Open details.`}
         onClick={() => onOpen(app.id)}
       >
-        <span className="app-tile-glyph" aria-hidden="true">
-          {app.glyph || app.name.slice(0, 1)}
+        <span className="app-tile-name" title={app.name}>
+          {app.name}
         </span>
-        <span className="app-tile-name">{app.name}</span>
-        <span className="app-tile-state">{state}</span>
-      </button>
+        </button>
       <button
         type="button"
         className="app-tile-action"
         disabled={action.disabled}
         aria-label={`${action.label}: ${app.name}`}
+        title={action.label}
         onClick={() => onAction(app)}
       >
-        {action.label}
+        <ActionGlyph icon={action.icon} />
       </button>
     </div>
   )

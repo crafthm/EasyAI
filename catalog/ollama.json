@@ -92,5 +92,28 @@
         "keep_paths": ["~/.ollama"]
       }
     }
-  ]
+  ],
+  "usage": {
+    "api": {
+      "base_url": "http://127.0.0.1:11434",
+      "openai_base_url": "http://127.0.0.1:11434/v1",
+      "docs_url": "https://docs.ollama.com"
+    },
+    "docs_url": "https://docs.ollama.com",
+    "cli": [
+      {
+        "label": "Pull a model",
+        "command": "ollama pull llama3.2"
+      },
+      {
+        "label": "Run a model",
+        "command": "ollama run llama3.2"
+      },
+      {
+        "label": "List models",
+        "command": "ollama list"
+      }
+    ],
+    "notes": "Ollama is an API and CLI. It does not ship a chat UI; pair it with a web UI such as Open WebUI for chat."
+  }
 }

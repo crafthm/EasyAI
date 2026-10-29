@@ -6,6 +6,7 @@ import {
   listJobs,
   onJobFinished,
   onJobLog,
+  openUrl,
   removeRecipe,
   uninstallApp,
   type AppDetail as AppDetailData,
@@ -26,6 +27,7 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
   const [liveLog, setLiveLog] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [copiedKey, setCopiedKey] = useState<string | null>(null)
 
   useEffect(() => {
     let disposed = false
@@ -102,6 +104,31 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
     }
   }
 
+  async function copyText(text: string, key: string) {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const area = document.createElement('textarea')
+      area.value = text
+      document.body.appendChild(area)
+      area.select()
+      document.execCommand('copy')
+      area.remove()
+    }
+    setCopiedKey(key)
+    window.setTimeout(() => {
+      setCopiedKey((current) => (current === key ? null : current))
+    }, 1500)
+  }
+
+  async function handleOpen(url: string) {
+    try {
+      await openUrl(appId, url)
+    } catch (err) {
+      setError(String(err))
+    }
+  }
+
   async function handleRemoveRecipe() {
     if (!detail) return
     const confirmed = window.confirm(
@@ -140,6 +167,7 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
   }
 
   const visibleLog = log ?? liveLog
+  const usage = detail?.usage ?? null
 
   return (
     <div
@@ -244,6 +272,83 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
               )}
             </div>
           </>
+        )}
+
+        {detail && detail.state !== 'not_installed' && usage && (
+          <div className="usage-section">
+            <h3 className="detail-section-title">Use</h3>
+            {usage.ui_url && (
+              <div className="usage-row">
+                <span className="usage-label">Web UI</span>
+                <code className="usage-value">{usage.ui_url}</code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  disabled={detail.state !== 'running'}
+                  onClick={() => void handleOpen(usage.ui_url!)}
+                >
+                  Open
+                </button>
+              </div>
+            )}
+            {usage.api?.base_url && (
+              <div className="usage-row">
+                <span className="usage-label">API base</span>
+                <code className="usage-value">{usage.api.base_url}</code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() => void copyText(usage.api!.base_url!, 'api')}
+                >
+                  {copiedKey === 'api' ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            )}
+            {usage.api?.openai_base_url && (
+              <div className="usage-row">
+                <span className="usage-label">OpenAI-compatible</span>
+                <code className="usage-value">{usage.api.openai_base_url}</code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() => void copyText(usage.api!.openai_base_url!, 'openai')}
+                >
+                  {copiedKey === 'openai' ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            )}
+            {(usage.api?.docs_url || usage.docs_url) && (
+              <div className="usage-row">
+                <span className="usage-label">Documentation</span>
+                <code className="usage-value">
+                  {usage.api?.docs_url ?? usage.docs_url}
+                </code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() =>
+                    void handleOpen((usage.api?.docs_url ?? usage.docs_url)!)
+                  }
+                >
+                  Open
+                </button>
+              </div>
+            )}
+            {usage.cli.map((item) => (
+              <div className="usage-row" key={item.command}>
+                <span className="usage-label">{item.label}</span>
+                <code className="usage-value">{item.command}</code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() => void copyText(item.command, item.command)}
+                >
+                  {copiedKey === item.command ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            ))}
+            {usage.notes && <p className="usage-note">{usage.notes}</p>}
+          </div>
         )}
 
         {detail?.provenanceJson && (
