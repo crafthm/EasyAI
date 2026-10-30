@@ -90,8 +90,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
         </header>
 
         <p className="detail-description">
-          Paste a recipe URL, or a GitHub repository that publishes
-          <code> easyai.json </code>or<code> .easyai/recipe.json</code>.
+          Paste a recipe URL, or a GitHub repository.
         </p>
 
         <div className="import-row">

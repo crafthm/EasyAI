@@ -229,8 +229,33 @@ body {
   align-content: start;
 }
 
+/* 相对定位容器：只在容器内定位 Logo、遮罩与状态点 */
 .app-tile {
+  align-self: start;
+}
+
+.app-tile-button {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-tile-button:focus-visible {
+  outline: none;
+}
+
+.app-tile-art {
   position: relative;
+  display: block;
+  width: 100%;
   aspect-ratio: 1;
   overflow: hidden;
   border-radius: 20px;
@@ -240,15 +265,15 @@ body {
     filter 120ms ease;
 }
 
-.app-tile:hover {
+.app-tile-button:hover .app-tile-art {
   filter: brightness(1.06);
 }
 
-.app-tile:active {
+.app-tile-button:active .app-tile-art {
   transform: scale(0.97);
 }
 
-.app-tile:focus-within {
+.app-tile-button:focus-visible .app-tile-art {
   outline: 2px solid var(--focus);
   outline-offset: -3px;
 }
@@ -262,7 +287,7 @@ body {
   pointer-events: none;
 }
 
-/* 压暗 Logo，保证名称与状态文字可读 */
+/* 无 Logo 时仅压暗渐变背景，保证名称可读 */
 .app-tile-shade {
   position: absolute;
   inset: 0;
@@ -274,88 +299,42 @@ body {
   pointer-events: none;
 }
 
-.app-tile-body {
-  position: relative;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  padding: 14px 12px 12px;
-  border: none;
-  border-radius: inherit;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-
-.app-tile-body:focus-visible {
-  outline: none;
-}
-
 .app-tile-name {
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 14px;
-  font-weight: 600;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.65);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg);
 }
 
 
-.app-tile-action {
+/* 运行状态指示：绿点运行中，红点未运行 */
+.app-tile-status {
   position: absolute;
   right: 10px;
   bottom: 10px;
-  width: 34px;
-  height: 34px;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid rgba(255, 255, 255, 0.5);
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
-  background: rgba(0, 0, 0, 0.38);
-  color: #fff;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    transform 120ms ease;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.55);
 }
 
-.app-tile-action:hover:not(:disabled) {
-  background: rgba(0, 0, 0, 0.58);
+.app-tile-status--up {
+  background: #22c55e;
 }
 
-.app-tile-action:active:not(:disabled) {
-  transform: scale(0.94);
-}
-
-.app-tile-action:disabled {
-  opacity: 0.7;
-  cursor: default;
-}
-
-.app-tile-action:focus-visible {
-  outline: 2px solid #fff;
-  outline-offset: 2px;
-}
-
-.icon-spin {
-  animation: icon-spin 900ms linear infinite;
-}
-
-@keyframes icon-spin {
-  to {
-    transform: rotate(360deg);
-  }
+.app-tile-status--down {
+  background: #ef4444;
 }
 
 .app-tile--empty {
+  aspect-ratio: 1;
+  margin-block: 6px;
   background: transparent;
   border: 1.5px dashed var(--empty-border);
+  border-radius: 20px;
   cursor: default;
   transition: none;
 }
@@ -846,16 +825,11 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .icon-button,
-  .app-tile,
-  .app-tile-action {
+  .app-tile-art {
     transition: none;
   }
 
-  .icon-spin {
-    animation: none;
-  }
-
-  .app-tile:active {
+  .app-tile-button:active .app-tile-art {
     transform: none;
   }
 }

@@ -19,3 +19,33 @@ export function lifecycleLabel(
   }
   return STATE_LABEL[app.state]
 }
+
+export type PrimaryAction = {
+  label: string
+  disabled: boolean
+}
+
+export function primaryAction(
+  app: Pick<AppSummary, 'state' | 'managed'>,
+): PrimaryAction {
+  switch (app.state) {
+    case 'not_installed':
+      return { label: 'Install', disabled: false }
+    case 'stopped':
+      return { label: 'Start', disabled: false }
+    case 'running':
+      return app.managed
+        ? { label: 'Stop', disabled: false }
+        : { label: 'Running externally', disabled: true }
+    case 'installing':
+      return { label: 'Installing…', disabled: true }
+    case 'starting':
+      return { label: 'Starting…', disabled: true }
+    case 'stopping':
+      return { label: 'Stopping…', disabled: true }
+    case 'uninstalling':
+      return { label: 'Uninstalling…', disabled: true }
+    case 'failed':
+      return { label: 'Failed', disabled: true }
+  }
+}

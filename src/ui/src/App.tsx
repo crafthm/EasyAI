@@ -24,6 +24,11 @@ function App() {
     }
   }
 
+  function handlePrimaryAction(appId: string) {
+    const app = apps.find((item) => item.id === appId)
+    if (app) handleAction(app)
+  }
+
   return (
     <div className="app">
       <Toolbar onImported={() => void refresh()} />
@@ -47,13 +52,14 @@ function App() {
           <p className="grid-message">Loading applications…</p>
         </main>
       ) : (
-        <AppGrid items={apps} onOpen={setSelectedId} onAction={handleAction} />
+        <AppGrid items={apps} onOpen={setSelectedId} />
       )}
       {selectedId && (
         <AppDetail
           appId={selectedId}
           onClose={closeDetail}
           onCatalogChanged={() => void refresh()}
+          onPrimaryAction={handlePrimaryAction}
         />
       )}
       {planApp && (

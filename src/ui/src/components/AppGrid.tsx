@@ -6,10 +6,9 @@ import { AppTile } from './AppTile'
 type Props = {
   items: AppSummary[]
   onOpen: (appId: string) => void
-  onAction: (app: AppSummary) => void
 }
 
-export function AppGrid({ items, onOpen, onAction }: Props) {
+export function AppGrid({ items, onOpen }: Props) {
   const viewportRef = useRef<HTMLDivElement>(null)
   const { cols, rows } = useGridLayout(viewportRef, items.length)
   const placeholderCount = Math.max(0, cols * rows - items.length)
@@ -24,12 +23,7 @@ export function AppGrid({ items, onOpen, onAction }: Props) {
           style={{ gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))` }}
         >
           {items.map((item) => (
-            <AppTile
-              key={item.id}
-              app={item}
-              onOpen={onOpen}
-              onAction={onAction}
-            />
+            <AppTile key={item.id} app={item} onOpen={onOpen} />
           ))}
           {Array.from({ length: placeholderCount }, (_, index) => (
             <div

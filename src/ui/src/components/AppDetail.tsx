@@ -4,6 +4,7 @@ import {
   getAppDetail,
   getJobLog,
   listJobs,
+  onAppState,
   onJobFinished,
   onJobLog,
   openUrl,
@@ -12,15 +13,21 @@ import {
   type AppDetail as AppDetailData,
   type JobRecord,
 } from '../api/apps'
-import { lifecycleLabel } from '../lifecycle'
+import { lifecycleLabel, primaryAction } from '../lifecycle'
 
 type Props = {
   appId: string
   onClose: () => void
   onCatalogChanged: () => void
+  onPrimaryAction: (appId: string) => void
 }
 
-export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
+export function AppDetail({
+  appId,
+  onClose,
+  onCatalogChanged,
+  onPrimaryAction,
+}: Props) {
   const [detail, setDetail] = useState<AppDetailData | null>(null)
   const [jobs, setJobs] = useState<JobRecord[]>([])
   const [log, setLog] = useState<string | null>(null)
@@ -33,6 +40,7 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
     let disposed = false
     let unlistenLog: UnlistenFn | undefined
     let unlistenFinished: UnlistenFn | undefined
+    let unlistenState: UnlistenFn | undefined
 
     getAppDetail(appId)
       .then((next) => {
@@ -79,6 +87,27 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
       })
       .catch(() => {})
 
+    onAppState((event) => {
+      if (event.appId !== appId) return
+      setDetail((current) =>
+        current
+          ? {
+              ...current,
+              state: event.state,
+              version:
+                event.version ??
+                (event.state === 'not_installed' ? null : current.version),
+              managed: event.managed,
+            }
+          : current,
+      )
+    })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlistenState = fn
+      })
+      .catch(() => {})
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
@@ -88,6 +117,7 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
       disposed = true
       unlistenLog?.()
       unlistenFinished?.()
+      unlistenState?.()
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [appId, onClose])
@@ -168,6 +198,7 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
 
   const visibleLog = log ?? liveLog
   const usage = detail?.usage ?? null
+  const action = detail ? primaryAction(detail) : null
 
   return (
     <div
@@ -242,6 +273,16 @@ export function AppDetail({ appId, onClose, onCatalogChanged }: Props) {
             )}
 
             <div className="detail-actions">
+              {action && (
+                <button
+                  type="button"
+                  className="popover-button popover-button--primary"
+                  disabled={busy || action.disabled}
+                  onClick={() => onPrimaryAction(appId)}
+                >
+                  {action.label}
+                </button>
+              )}
               <button
                 type="button"
                 className="popover-button"
