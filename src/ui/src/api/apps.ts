@@ -83,20 +83,12 @@ export type InstallPlan = {
   action: string
 }
 
-export type RecipeInstall = {
+export type RecipeMethod = {
+  id: string
   kind: string
-  repo: string
-  asset: Record<string, string>
-}
-
-export type RecipeService = {
-  command: string[]
-  health_url: string
-  env: Record<string, string>
-}
-
-export type RecipeUninstall = {
-  keep_paths: string[]
+  when: { os: string[]; arch: string[] }
+  source: { repo: string | null; asset: Record<string, string> } | null
+  service: { command: string[]; health_url: string } | null
 }
 
 export type Recipe = {
@@ -108,9 +100,7 @@ export type Recipe = {
   icon: string
   draft: boolean
   platforms: string[]
-  install: RecipeInstall | null
-  service: RecipeService | null
-  uninstall: RecipeUninstall | null
+  methods: RecipeMethod[]
 }
 
 export type MethodSettings = {

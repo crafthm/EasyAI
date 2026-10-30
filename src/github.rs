@@ -167,6 +167,45 @@ pub struct RepoSummary {
     pub description: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ReleaseInfo {
+    pub tag_name: String,
+    #[serde(default)]
+    pub assets: Vec<ReleaseAsset>,
+}
+
+#[derive(Deserialize)]
+pub struct ReleaseAsset {
+    pub name: String,
+}
+
+/// Latest published (non-prerelease) release, or `None` when the repository
+/// has not published one.
+pub fn latest_release(owner: &str, name: &str) -> Result<Option<ReleaseInfo>, String> {
+    let response = http_client()?
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/releases/latest"
+        ))
+        .send()
+        .map_err(|err| format!("Could not reach GitHub: {err}"))?;
+
+    let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(match status.as_u16() {
+            403 => "GitHub API rate limit exceeded. Try again later.".to_string(),
+            _ => format!("GitHub API returned {status}."),
+        });
+    }
+
+    response
+        .json::<ReleaseInfo>()
+        .map(Some)
+        .map_err(|err| format!("Invalid release metadata from GitHub: {err}"))
+}
+
 pub fn repo_summary(owner: &str, name: &str) -> Result<RepoSummary, String> {
     let repo = fetch_repo(owner, name)?;
     Ok(RepoSummary {

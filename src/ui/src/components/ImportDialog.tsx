@@ -56,10 +56,14 @@ export function ImportDialog({ onClose, onImported }: Props) {
     }
   }
 
-  const install = preview?.recipe.install
-  const service = preview?.recipe.service
-  const uninstall = preview?.recipe.uninstall
+  const methods = preview?.recipe.methods ?? []
   const draft = preview?.recipe.draft ?? false
+  const [os, arch] = preview ? preview.platform.split('-') : ['', '']
+  const currentMethod = methods.find(
+    (method) => method.when.os.includes(os) && method.when.arch.includes(arch),
+  )
+  const currentAsset = currentMethod?.source?.asset[preview?.platform ?? ''] ?? null
+  const currentService = currentMethod?.service ?? null
   const canImport = Boolean(
     preview && preview.supported && !preview.conflict && !busy,
   )
@@ -138,50 +142,21 @@ export function ImportDialog({ onClose, onImported }: Props) {
               <dd className="preview-mono">{preview.sha256.slice(0, 16)}…</dd>
               <dt>Platforms</dt>
               <dd>{preview.recipe.platforms.join(', ') || '—'}</dd>
-              {draft ? (
+              <dt>Type</dt>
+              <dd>
+                {draft
+                  ? 'Draft · no install method'
+                  : `${currentMethod?.kind ?? methods[0]?.kind ?? 'release'} · ${methods.length} platform${methods.length === 1 ? '' : 's'}`}
+              </dd>
+              {!draft && (
                 <>
-                  <dt>Type</dt>
-                  <dd>Draft · no install method</dd>
-                </>
-              ) : (
-                <>
-                  <dt>This machine</dt>
-                  <dd>
-                    {preview.supported
-                      ? `Supported (${preview.platform})`
-                      : `Not supported (${preview.platform})`}
-                  </dd>
-                  <dt>Install</dt>
-                  <dd>
-                    {install
-                      ? `${install.kind} · ${install.repo}`
-                      : 'Missing install section'}
-                  </dd>
-                  {install && (
-                    <>
-                      <dt>Asset</dt>
-                      <dd className="preview-mono">
-                        {install.asset[preview.platform] ?? '—'}
-                      </dd>
-                    </>
-                  )}
+                  <dt>Asset ({preview.platform})</dt>
+                  <dd className="preview-mono">{currentAsset ?? '—'}</dd>
                   <dt>Start command</dt>
                   <dd className="preview-mono">
-                    {service
-                      ? service.command.join(' ')
-                      : 'Missing service section'}
-                  </dd>
-                  <dt>Health check</dt>
-                  <dd className="preview-mono">
-                    {service?.health_url ?? 'Missing'}
-                  </dd>
-                  <dt>Uninstall</dt>
-                  <dd>
-                    {uninstall
-                      ? uninstall.keep_paths.length > 0
-                        ? `Keeps ${uninstall.keep_paths.join(', ')}`
-                        : 'Removes installed files'
-                      : 'Missing uninstall section'}
+                    {currentService
+                      ? currentService.command.join(' ')
+                      : 'Not inferred'}
                   </dd>
                 </>
               )}

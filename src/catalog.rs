@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -861,16 +861,34 @@ fn preview_draft(
 ) -> Result<RecipePreview, String> {
     let (owner, repo_name) = github_repo_from_input(input)?;
     let repo = crate::github::repo_summary(&owner, &repo_name)?;
-    let recipe = draft_recipe(&owner, &repo);
+    let (release, release_error) = match crate::github::latest_release(&owner, &repo_name) {
+        Ok(release) => (release, None),
+        Err(err) => (None, Some(err)),
+    };
+    let (recipe, candidate_warnings) = candidate_recipe(&owner, &repo, release.as_ref());
+    let mut warnings = vec![
+        "This repository publishes no EasyAI recipe. A candidate recipe was generated from its latest release."
+            .to_string(),
+    ];
+    warnings.extend(candidate_warnings);
+    if let Some(err) = release_error {
+        warnings.push(format!("Could not read the latest release: {err}"));
+    }
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     let conflict = entries(app_data)?
         .iter()
         .any(|entry| entry.recipe.id == recipe.id);
-
-    let mut warnings = vec![
-        "This repository publishes no EasyAI recipe. It will be added as a draft without an install method."
-            .to_string(),
-    ];
+    let supported = if recipe.draft {
+        true
+    } else {
+        let (os, arch) = split_platform(platform)?;
+        recipe.supports_platform(os, arch)
+    };
+    if !supported {
+        warnings.push(format!(
+            "The latest release has no archive for this machine ({platform})."
+        ));
+    }
     if conflict {
         warnings.push(format!(
             "An application with id '{}' already exists.",
@@ -883,7 +901,7 @@ fn preview_draft(
         source_url: repo.html_url,
         sha256,
         platform: platform.to_string(),
-        supported: true,
+        supported,
         conflict,
         warnings,
     })
@@ -896,7 +914,8 @@ fn import_draft(
 ) -> Result<CatalogEntry, String> {
     let (owner, repo_name) = github_repo_from_input(input)?;
     let repo = crate::github::repo_summary(&owner, &repo_name)?;
-    let recipe = draft_recipe(&owner, &repo);
+    let release = crate::github::latest_release(&owner, &repo_name)?;
+    let (recipe, _) = candidate_recipe(&owner, &repo, release.as_ref());
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     if sha256 != expected_sha256 {
         return Err(
@@ -1039,22 +1058,180 @@ fn try_fetch_recipe(input: &str) -> Result<Option<(String, String)>, String> {
     Ok(Some((url.to_string(), content)))
 }
 
-fn draft_recipe(owner: &str, repo: &crate::github::RepoSummary) -> Recipe {
-    Recipe {
+/// Builds a candidate recipe from repository metadata and its latest release.
+/// Without a usable archive the recipe stays a metadata-only draft.
+fn candidate_recipe(
+    owner: &str,
+    repo: &crate::github::RepoSummary,
+    release: Option<&crate::github::ReleaseInfo>,
+) -> (Recipe, Vec<String>) {
+    let full_repo = format!("{owner}/{}", repo.name);
+    let mut assets: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    if let Some(release) = release {
+        for asset in &release.assets {
+            let Some(rank) = archive_rank(&asset.name) else {
+                continue;
+            };
+            for platform in platforms_for_asset(&asset.name) {
+                if assets
+                    .get(&platform)
+                    .is_some_and(|(best, _)| *best <= rank)
+                {
+                    continue;
+                }
+                assets.insert(
+                    platform,
+                    (rank, versioned_asset(&asset.name, &release.tag_name)),
+                );
+            }
+        }
+    }
+
+    let methods: Vec<Method> = assets
+        .iter()
+        .map(|(platform, (_, asset))| release_method(&full_repo, platform, asset))
+        .collect();
+    let mut warnings = Vec::new();
+    if methods.is_empty() {
+        warnings.push(
+            "No usable release archive was found. The app will be added as a draft without an install method."
+                .to_string(),
+        );
+    } else {
+        warnings.push(
+            "Install method inferred from the latest GitHub Release. Review it before installing."
+                .to_string(),
+        );
+        warnings.push(
+            "No start command was inferred. Start/Stop will not work until the recipe is edited."
+                .to_string(),
+        );
+    }
+
+    let recipe = Recipe {
         id: draft_id(owner, &repo.name),
         name: repo.name.clone(),
         description: repo.description.clone().unwrap_or_default(),
         glyph: String::new(),
         color: String::new(),
         icon: String::new(),
-        draft: true,
-        platforms: Vec::new(),
-        methods: Vec::new(),
-        usage: None,
+        draft: methods.is_empty(),
+        platforms: assets.keys().cloned().collect(),
+        methods,
+        usage: Some(Usage {
+            docs_url: Some(repo.html_url.clone()),
+            ..Default::default()
+        }),
         legacy_install: None,
         legacy_service: None,
         legacy_uninstall: None,
+    };
+    (recipe, warnings)
+}
+
+fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
+    let (os, arch) = platform.split_once('-').unwrap_or((platform, ""));
+    Method {
+        id: format!("release-{platform}"),
+        kind: MethodKind::Release,
+        when: MethodWhen {
+            os: vec![os.to_string()],
+            arch: vec![arch.to_string()],
+            ..Default::default()
+        },
+        prefer: 80,
+        advanced: false,
+        elevation: false,
+        version: Some(VersionSource {
+            kind: "github-release".to_string(),
+            repo: Some(repo.to_string()),
+            command: None,
+            package: None,
+            image: None,
+        }),
+        service: None,
+        uninstall: Some(Uninstall {
+            keep_paths: Vec::new(),
+            remove_paths: Vec::new(),
+            command: None,
+            native: false,
+        }),
+        size: None,
+        source: Some(MethodSource {
+            repo: Some(repo.to_string()),
+            asset: HashMap::from([(platform.to_string(), asset.to_string())]),
+            url: None,
+            sha256: None,
+            git: None,
+            git_ref: None,
+            build: None,
+        }),
+        image: None,
+        package: None,
+        language: None,
+        script: None,
+        universal: None,
     }
+}
+
+/// Downloadable archive formats the release executor can extract.
+fn archive_rank(name: &str) -> Option<u8> {
+    let lower = name.to_ascii_lowercase();
+    if lower.ends_with(".sha256")
+        || lower.contains("sha256sum")
+        || lower.ends_with(".sig")
+        || lower.ends_with(".asc")
+        || lower.ends_with(".zsync")
+    {
+        return None;
+    }
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        Some(0)
+    } else if lower.ends_with(".tar.zst") {
+        Some(1)
+    } else if lower.ends_with(".zip") {
+        Some(2)
+    } else if lower.ends_with(".7z") {
+        Some(3)
+    } else if lower.ends_with(".tar") {
+        Some(4)
+    } else {
+        None
+    }
+}
+
+fn platforms_for_asset(name: &str) -> Vec<String> {
+    let lower = name.to_ascii_lowercase();
+    let os = if lower.contains("linux") {
+        "linux"
+    } else if lower.contains("macos") || lower.contains("darwin") || lower.contains("osx") {
+        "macos"
+    } else if lower.contains("windows") || lower.contains("win64") {
+        "windows"
+    } else {
+        return Vec::new();
+    };
+    if os == "macos" && lower.contains("universal") {
+        return vec!["macos-x86_64".to_string(), "macos-aarch64".to_string()];
+    }
+    let arch = if lower.contains("aarch64") || lower.contains("arm64") {
+        "aarch64"
+    } else if lower.contains("x86_64") || lower.contains("amd64") || lower.contains("x64") {
+        "x86_64"
+    } else {
+        return Vec::new();
+    };
+    vec![format!("{os}-{arch}")]
+}
+
+/// Replaces the concrete version in an asset name with the `{version}`
+/// template the release executor expands at install time.
+fn versioned_asset(name: &str, tag: &str) -> String {
+    let version = tag.trim().trim_start_matches(['v', 'V']);
+    if version.len() < 3 || !version.contains('.') {
+        return name.to_string();
+    }
+    name.replace(version, "{version}")
 }
 
 /// A stable id for a draft: `owner-repo` lowercased and limited to the
@@ -1292,6 +1469,45 @@ mod tests {
             super::draft_id("Tangency-Labs", "Solid.Craft"),
             "tangency-labs-solid-craft"
         );
+    }
+
+    #[test]
+    fn candidate_recipe_infers_release_methods_from_assets() {
+        let repo = crate::github::RepoSummary {
+            name: "solidcraft".to_string(),
+            html_url: "https://github.com/tangency-labs/solidcraft".to_string(),
+            description: Some("CAD".to_string()),
+        };
+        let asset = |name: &str| crate::github::ReleaseAsset {
+            name: name.to_string(),
+        };
+        let release = crate::github::ReleaseInfo {
+            tag_name: "v0.27.1".to_string(),
+            assets: vec![
+                asset("solidcraft-0.27.1-linux-x86_64.tar.gz"),
+                asset("solidcraft-0.27.1-linux-aarch64.tar.gz"),
+                asset("solidcraft-0.27.1-macos-universal.dmg"),
+                asset("SHA256SUMS.txt"),
+            ],
+        };
+
+        let (recipe, warnings) =
+            super::candidate_recipe("tangency-labs", &repo, Some(&release));
+        assert!(!recipe.draft);
+        assert_eq!(recipe.id, "tangency-labs-solidcraft");
+        assert_eq!(recipe.platforms, vec!["linux-aarch64", "linux-x86_64"]);
+        assert_eq!(recipe.methods.len(), 2);
+        let method = recipe
+            .methods
+            .iter()
+            .find(|method| method.id == "release-linux-x86_64")
+            .unwrap();
+        assert_eq!(
+            method.source.as_ref().unwrap().asset["linux-x86_64"],
+            "solidcraft-{version}-linux-x86_64.tar.gz"
+        );
+        assert!(recipe.validate().is_ok());
+        assert!(warnings.iter().any(|warning| warning.contains("No start command")));
     }
 
     #[test]

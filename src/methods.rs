@@ -323,7 +323,8 @@ fn install_release(
         .ok_or_else(|| "Release method has no repository.".to_string())?;
     let release = fetch_latest_release(repo)?;
     let version = normalize_version(&release.tag)?;
-    let asset_name = probe::asset_for(source, ctx.platform)?;
+    let asset_name =
+        probe::asset_for(source, ctx.platform)?.replace("{version}", &version);
     let asset = release
         .assets
         .iter()
@@ -377,7 +378,9 @@ fn install_portable(
             .as_ref()
             .ok_or_else(|| "Portable method has no repository.".to_string())?;
         let release = fetch_latest_release(repo)?;
-        let asset_name = probe::asset_for(source, ctx.platform)?;
+        let version = normalize_version(&release.tag)?;
+        let asset_name =
+            probe::asset_for(source, ctx.platform)?.replace("{version}", &version);
         release
             .assets
             .iter()
