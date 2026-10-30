@@ -59,6 +59,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
   const install = preview?.recipe.install
   const service = preview?.recipe.service
   const uninstall = preview?.recipe.uninstall
+  const draft = preview?.recipe.draft ?? false
   const canImport = Boolean(
     preview && preview.supported && !preview.conflict && !busy,
   )
@@ -136,43 +137,54 @@ export function ImportDialog({ onClose, onImported }: Props) {
               <dt>Checksum</dt>
               <dd className="preview-mono">{preview.sha256.slice(0, 16)}…</dd>
               <dt>Platforms</dt>
-              <dd>{preview.recipe.platforms.join(', ')}</dd>
-              <dt>This machine</dt>
-              <dd>
-                {preview.supported
-                  ? `Supported (${preview.platform})`
-                  : `Not supported (${preview.platform})`}
-              </dd>
-              <dt>Install</dt>
-              <dd>
-                {install
-                  ? `${install.kind} · ${install.repo}`
-                  : 'Missing install section'}
-              </dd>
-              {install && (
+              <dd>{preview.recipe.platforms.join(', ') || '—'}</dd>
+              {draft ? (
                 <>
-                  <dt>Asset</dt>
+                  <dt>Type</dt>
+                  <dd>Draft · no install method</dd>
+                </>
+              ) : (
+                <>
+                  <dt>This machine</dt>
+                  <dd>
+                    {preview.supported
+                      ? `Supported (${preview.platform})`
+                      : `Not supported (${preview.platform})`}
+                  </dd>
+                  <dt>Install</dt>
+                  <dd>
+                    {install
+                      ? `${install.kind} · ${install.repo}`
+                      : 'Missing install section'}
+                  </dd>
+                  {install && (
+                    <>
+                      <dt>Asset</dt>
+                      <dd className="preview-mono">
+                        {install.asset[preview.platform] ?? '—'}
+                      </dd>
+                    </>
+                  )}
+                  <dt>Start command</dt>
                   <dd className="preview-mono">
-                    {install.asset[preview.platform] ?? '—'}
+                    {service
+                      ? service.command.join(' ')
+                      : 'Missing service section'}
+                  </dd>
+                  <dt>Health check</dt>
+                  <dd className="preview-mono">
+                    {service?.health_url ?? 'Missing'}
+                  </dd>
+                  <dt>Uninstall</dt>
+                  <dd>
+                    {uninstall
+                      ? uninstall.keep_paths.length > 0
+                        ? `Keeps ${uninstall.keep_paths.join(', ')}`
+                        : 'Removes installed files'
+                      : 'Missing uninstall section'}
                   </dd>
                 </>
               )}
-              <dt>Start command</dt>
-              <dd className="preview-mono">
-                {service ? service.command.join(' ') : 'Missing service section'}
-              </dd>
-              <dt>Health check</dt>
-              <dd className="preview-mono">
-                {service?.health_url ?? 'Missing'}
-              </dd>
-              <dt>Uninstall</dt>
-              <dd>
-                {uninstall
-                  ? uninstall.keep_paths.length > 0
-                    ? `Keeps ${uninstall.keep_paths.join(', ')}`
-                    : 'Removes installed files'
-                  : 'Missing uninstall section'}
-              </dd>
             </dl>
 
             {preview.conflict && (

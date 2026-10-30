@@ -234,6 +234,12 @@ export function AppDetail({
         {detail && (
           <>
             <p className="detail-description">{detail.description}</p>
+            {detail.draft && (
+              <p className="preview-warning">
+                No install method yet. Imported from a repository without an
+                EasyAI recipe.
+              </p>
+            )}
             <div className="detail-row">
               <span>State</span>
               <span>{lifecycleLabel(detail)}</span>

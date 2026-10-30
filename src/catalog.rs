@@ -24,6 +24,9 @@ pub struct Recipe {
     pub color: String,
     #[serde(default)]
     pub icon: String,
+    /// Imported from a repository that publishes no recipe; metadata only.
+    #[serde(default)]
+    pub draft: bool,
     #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
@@ -384,13 +387,13 @@ impl Recipe {
         if self.name.trim().is_empty() {
             return Err(format!("Recipe '{}' is missing a name.", self.id));
         }
-        if self.platforms.is_empty() {
+        if !self.draft && self.platforms.is_empty() {
             return Err(format!(
                 "Recipe '{}' does not declare any supported platforms.",
                 self.id
             ));
         }
-        if self.methods.is_empty() {
+        if !self.draft && self.methods.is_empty() {
             return Err(format!("Recipe '{}' declares no installation methods.", self.id));
         }
 
@@ -813,10 +816,12 @@ pub fn find(app_data: &Path, app_id: &str) -> Result<CatalogEntry, String> {
 }
 
 pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, String> {
-    let (source_url, content) = fetch_recipe_source(input)?;
+    let platform = crate::probe::current_platform_id()?;
+    let Some((source_url, content)) = try_fetch_recipe(input)? else {
+        return preview_draft(app_data, input, &platform);
+    };
     let sha256 = sha256_hex(content.as_bytes());
     let recipe = parse_recipe(&content)?;
-    let platform = crate::probe::current_platform_id()?;
     let (os, arch) = split_platform(&platform)?;
     let supported = recipe.supports_platform(os, arch);
     let conflict = entries(app_data)?
@@ -849,6 +854,77 @@ pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, Str
     })
 }
 
+fn preview_draft(
+    app_data: &Path,
+    input: &str,
+    platform: &str,
+) -> Result<RecipePreview, String> {
+    let (owner, repo_name) = github_repo_from_input(input)?;
+    let repo = crate::github::repo_summary(&owner, &repo_name)?;
+    let recipe = draft_recipe(&owner, &repo);
+    let sha256 = sha256_hex(&draft_bytes(&recipe)?);
+    let conflict = entries(app_data)?
+        .iter()
+        .any(|entry| entry.recipe.id == recipe.id);
+
+    let mut warnings = vec![
+        "This repository publishes no EasyAI recipe. It will be added as a draft without an install method."
+            .to_string(),
+    ];
+    if conflict {
+        warnings.push(format!(
+            "An application with id '{}' already exists.",
+            recipe.id
+        ));
+    }
+
+    Ok(RecipePreview {
+        recipe,
+        source_url: repo.html_url,
+        sha256,
+        platform: platform.to_string(),
+        supported: true,
+        conflict,
+        warnings,
+    })
+}
+
+fn import_draft(
+    app_data: &Path,
+    input: &str,
+    expected_sha256: &str,
+) -> Result<CatalogEntry, String> {
+    let (owner, repo_name) = github_repo_from_input(input)?;
+    let repo = crate::github::repo_summary(&owner, &repo_name)?;
+    let recipe = draft_recipe(&owner, &repo);
+    let sha256 = sha256_hex(&draft_bytes(&recipe)?);
+    if sha256 != expected_sha256 {
+        return Err(
+            "The repository changed since it was previewed. Preview it again.".to_string(),
+        );
+    }
+    if entries(app_data)?
+        .iter()
+        .any(|entry| entry.recipe.id == recipe.id)
+    {
+        return Err(format!(
+            "An application with id '{}' already exists.",
+            recipe.id
+        ));
+    }
+
+    let source = RecipeSource {
+        url: repo.html_url,
+        sha256,
+        imported_at: imported_at(),
+    };
+    store_imported(app_data, &recipe, &source)?;
+    Ok(CatalogEntry {
+        recipe,
+        source: Some(source),
+    })
+}
+
 pub fn import_recipe(
     app_data: &Path,
     input: &str,
@@ -857,7 +933,9 @@ pub fn import_recipe(
     if expected_sha256.trim().is_empty() {
         return Err("The recipe preview is missing its checksum. Preview it again.".to_string());
     }
-    let (source_url, content) = fetch_recipe_source(input)?;
+    let Some((source_url, content)) = try_fetch_recipe(input)? else {
+        return import_draft(app_data, input, expected_sha256);
+    };
     let sha256 = sha256_hex(content.as_bytes());
     if sha256 != expected_sha256 {
         return Err("The recipe changed since it was previewed. Preview it again.".to_string());
@@ -876,10 +954,7 @@ pub fn import_recipe(
         ));
     }
 
-    let imported_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_secs().to_string())
-        .unwrap_or_else(|_| "0".to_string());
+    let imported_at = imported_at();
     let source = RecipeSource {
         url: source_url,
         sha256,
@@ -940,7 +1015,9 @@ fn parse_recipe(content: &str) -> Result<Recipe, String> {
     Ok(recipe)
 }
 
-fn fetch_recipe_source(input: &str) -> Result<(String, String), String> {
+/// Returns the recipe at this URL. `None` means the input is a GitHub
+/// repository that publishes no recipe; the caller may import a draft instead.
+fn try_fetch_recipe(input: &str) -> Result<Option<(String, String)>, String> {
     let url = reqwest::Url::parse(input.trim())
         .map_err(|_| "Enter a valid recipe or GitHub repository URL.".to_string())?;
     ensure_allowed_scheme(&url)?;
@@ -950,20 +1027,68 @@ fn fetch_recipe_source(input: &str) -> Result<(String, String), String> {
             format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/easyai.json"),
             format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/.easyai/recipe.json"),
         ];
-        let mut last_error = String::new();
         for candidate in candidates {
-            match http_get(&candidate) {
-                Ok(content) => return Ok((candidate, content)),
-                Err(err) => last_error = err,
+            if let Some(content) = http_get_optional(&candidate)? {
+                return Ok(Some((candidate, content)));
             }
         }
-        return Err(format!(
-            "This repository does not publish an EasyAI recipe (looked for easyai.json and .easyai/recipe.json). {last_error}"
-        ));
+        return Ok(None);
     }
 
     let content = http_get(url.as_str())?;
-    Ok((url.to_string(), content))
+    Ok(Some((url.to_string(), content)))
+}
+
+fn draft_recipe(owner: &str, repo: &crate::github::RepoSummary) -> Recipe {
+    Recipe {
+        id: draft_id(owner, &repo.name),
+        name: repo.name.clone(),
+        description: repo.description.clone().unwrap_or_default(),
+        glyph: String::new(),
+        color: String::new(),
+        icon: String::new(),
+        draft: true,
+        platforms: Vec::new(),
+        methods: Vec::new(),
+        usage: None,
+        legacy_install: None,
+        legacy_service: None,
+        legacy_uninstall: None,
+    }
+}
+
+/// A stable id for a draft: `owner-repo` lowercased and limited to the
+/// characters allowed in recipe ids.
+fn draft_id(owner: &str, name: &str) -> String {
+    format!("{owner}-{name}")
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+fn github_repo_from_input(input: &str) -> Result<(String, String), String> {
+    let url = reqwest::Url::parse(input.trim())
+        .map_err(|_| "Enter a valid GitHub repository URL.".to_string())?;
+    github_repo_parts(&url)
+        .ok_or_else(|| "Enter a valid GitHub repository URL.".to_string())
+}
+
+fn draft_bytes(recipe: &Recipe) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(recipe).map_err(|err| format!("Failed to prepare the draft: {err}"))
+}
+
+fn imported_at() -> String {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 fn ensure_allowed_scheme(url: &reqwest::Url) -> Result<(), String> {
@@ -1030,6 +1155,10 @@ fn is_valid_github_name(name: &str) -> bool {
 }
 
 fn http_get(url: &str) -> Result<String, String> {
+    http_get_optional(url)?.ok_or_else(|| "Recipe not found (404).".to_string())
+}
+
+fn http_get_optional(url: &str) -> Result<Option<String>, String> {
     let client = reqwest::blocking::Client::builder()
         .user_agent("EasyAI/0.1")
         .timeout(Duration::from_secs(20))
@@ -1041,9 +1170,11 @@ fn http_get(url: &str) -> Result<String, String> {
         .send()
         .map_err(|err| format!("Could not fetch the recipe: {err}"))?;
     let status = response.status();
+    if status.as_u16() == 404 {
+        return Ok(None);
+    }
     if !status.is_success() {
         return Err(match status.as_u16() {
-            404 => "Recipe not found (404).".to_string(),
             403 => "The recipe server denied access (403).".to_string(),
             _ => format!("The recipe server returned {status}."),
         });
@@ -1061,7 +1192,9 @@ fn http_get(url: &str) -> Result<String, String> {
     if buffer.len() as u64 > MAX_RECIPE_BYTES {
         return Err("The recipe is too large.".to_string());
     }
-    String::from_utf8(buffer).map_err(|_| "The recipe is not valid UTF-8.".to_string())
+    let content = String::from_utf8(buffer)
+        .map_err(|_| "The recipe is not valid UTF-8.".to_string())?;
+    Ok(Some(content))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1132,6 +1265,33 @@ mod tests {
         let recipe = parse(base_recipe());
         assert!(recipe.validate().is_ok());
         assert_eq!(recipe.methods.len(), 1);
+    }
+
+    #[test]
+    fn draft_recipe_validates_without_methods_or_platforms() {
+        let draft = parse(json!({
+            "id": "owner-repo",
+            "name": "repo",
+            "draft": true
+        }));
+        assert!(draft.validate().is_ok());
+        assert_eq!(
+            draft
+                .icon_url(Some("https://github.com/owner/repo"))
+                .as_deref(),
+            Some("https://github.com/owner.png?size=200")
+        );
+
+        let regular = parse(json!({ "id": "owner-repo", "name": "repo" }));
+        assert!(regular.validate().is_err());
+    }
+
+    #[test]
+    fn draft_ids_are_lowercase_and_url_safe() {
+        assert_eq!(
+            super::draft_id("Tangency-Labs", "Solid.Craft"),
+            "tangency-labs-solid-craft"
+        );
     }
 
     #[test]

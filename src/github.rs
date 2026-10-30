@@ -159,6 +159,23 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|err| format!("Failed to create HTTP client: {err}"))
 }
 
+/// Metadata used to create a draft catalog entry when a repository does not
+/// publish an EasyAI recipe.
+pub struct RepoSummary {
+    pub name: String,
+    pub html_url: String,
+    pub description: Option<String>,
+}
+
+pub fn repo_summary(owner: &str, name: &str) -> Result<RepoSummary, String> {
+    let repo = fetch_repo(owner, name)?;
+    Ok(RepoSummary {
+        name: repo.name,
+        html_url: repo.html_url,
+        description: repo.description,
+    })
+}
+
 fn fetch_repo(owner: &str, name: &str) -> Result<GithubRepo, String> {
     let response = http_client()?
         .get(format!("https://api.github.com/repos/{owner}/{name}"))

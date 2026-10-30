@@ -20,6 +20,7 @@ pub struct AppSummary {
     pub glyph: String,
     pub color: String,
     pub icon_url: Option<String>,
+    pub draft: bool,
     pub state: String,
     pub version: Option<String>,
     pub managed: bool,
@@ -36,6 +37,7 @@ pub struct AppDetail {
     pub description: String,
     pub glyph: String,
     pub color: String,
+    pub draft: bool,
     pub state: String,
     pub version: Option<String>,
     pub install_dir: Option<String>,
@@ -118,6 +120,7 @@ fn list_apps_with(
                     },
                 };
             let icon_url = recipe.icon_url(source_url.as_deref());
+            let draft = recipe.draft;
             AppSummary {
                 id: recipe.id,
                 name: recipe.name,
@@ -125,6 +128,7 @@ fn list_apps_with(
                 glyph: recipe.glyph,
                 color: recipe.color,
                 icon_url,
+                draft,
                 state,
                 version,
                 managed,
@@ -176,6 +180,7 @@ pub fn get_app_detail(
         description: recipe.description,
         glyph: recipe.glyph,
         color: recipe.color,
+        draft: recipe.draft,
         state,
         version: record.as_ref().map(|app| app.version.clone()),
         install_dir: record.as_ref().map(|app| app.install_dir.clone()),

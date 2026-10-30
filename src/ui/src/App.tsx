@@ -15,6 +15,7 @@ function App() {
   const closePlan = useCallback(() => setPlanApp(null), [])
 
   function handleAction(app: AppSummary) {
+    if (app.draft) return
     if (app.state === 'not_installed') {
       setPlanApp(app)
     } else if (app.state === 'stopped') {

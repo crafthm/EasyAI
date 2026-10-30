@@ -18,6 +18,7 @@ export type AppSummary = {
   glyph: string
   color: string
   iconUrl: string | null
+  draft: boolean
   state: LifecycleState
   version: string | null
   managed: boolean
@@ -105,6 +106,7 @@ export type Recipe = {
   glyph: string
   color: string
   icon: string
+  draft: boolean
   platforms: string[]
   install: RecipeInstall | null
   service: RecipeService | null

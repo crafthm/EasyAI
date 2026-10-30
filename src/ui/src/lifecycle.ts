@@ -26,8 +26,11 @@ export type PrimaryAction = {
 }
 
 export function primaryAction(
-  app: Pick<AppSummary, 'state' | 'managed'>,
+  app: Pick<AppSummary, 'state' | 'managed' | 'draft'>,
 ): PrimaryAction {
+  if (app.draft) {
+    return { label: 'No install method', disabled: true }
+  }
   switch (app.state) {
     case 'not_installed':
       return { label: 'Install', disabled: false }
