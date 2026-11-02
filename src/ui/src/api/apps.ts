@@ -40,6 +40,7 @@ export type UsageCli = {
 
 export type Usage = {
   ui_url: string | null
+  website: string | null
   api: UsageApi | null
   docs_url: string | null
   cli: UsageCli[]
@@ -50,6 +51,7 @@ export type AppDetail = Omit<AppSummary, 'iconUrl'> & {
   installDir: string | null
   method: string | null
   healthOk: boolean
+  healthMonitored: boolean
   provenanceJson: string | null
   bomPath: string | null
   usage: Usage | null

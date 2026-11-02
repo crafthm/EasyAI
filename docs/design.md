@@ -296,6 +296,7 @@ a **Use** section; recipes without usage show no empty panel.
 - CLI examples are copyable; docs URLs open in the system browser.
 - `open_url(app_id, url)` only opens URLs declared by the recipe; arbitrary URLs are rejected.
 - Model listing/pulling, embedded terminals, and partner-app pairing are follow-up phases.
+- Accuracy, verification, and coverage workflow: [usage-guidance-strategy.md](usage-guidance-strategy.md).
 
 ### 4.5 Versions and upgrades
 

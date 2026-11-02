@@ -148,6 +148,7 @@ impl MethodWhen {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Usage {
     pub ui_url: Option<String>,
+    pub website: Option<String>,
     pub api: Option<ApiUsage>,
     pub docs_url: Option<String>,
     #[serde(default)]
@@ -207,6 +208,9 @@ impl Usage {
         let mut urls = Vec::new();
         if let Some(url) = &self.ui_url {
             urls.push(("ui_url", url.as_str()));
+        }
+        if let Some(url) = &self.website {
+            urls.push(("website", url.as_str()));
         }
         if let Some(api) = &self.api {
             if let Some(url) = &api.base_url {
@@ -1114,12 +1118,12 @@ fn candidate_recipe(
         description: repo.description.clone().unwrap_or_default(),
         glyph: String::new(),
         color: String::new(),
-        icon: String::new(),
+        icon: repo.logo.clone().unwrap_or_default(),
         draft: methods.is_empty(),
         platforms: assets.keys().cloned().collect(),
         methods,
-        usage: Some(Usage {
-            docs_url: Some(repo.html_url.clone()),
+        usage: repo.homepage.as_ref().map(|homepage| Usage {
+            website: Some(homepage.clone()),
             ..Default::default()
         }),
         legacy_install: None,
@@ -1182,6 +1186,12 @@ fn archive_rank(name: &str) -> Option<u8> {
         || lower.ends_with(".sig")
         || lower.ends_with(".asc")
         || lower.ends_with(".zsync")
+        || lower.contains("delta")
+        || lower.contains("sources")
+        || lower.contains("-source")
+        || lower.contains("_source")
+        || lower.contains("symbols")
+        || lower.contains("debug")
     {
         return None;
     }
@@ -1472,11 +1482,30 @@ mod tests {
     }
 
     #[test]
+    fn archive_rank_skips_deltas_and_sources() {
+        assert!(super::archive_rank("BeefTV-v2.1.2-linux-amd64.zip").is_some());
+        assert!(
+            super::archive_rank("BeefTV-v2.1.2-linux-amd64-from-v2.1.1.delta.zip")
+                .is_none()
+        );
+        assert!(super::archive_rank(
+            "BeefTV-v2.1.2-ffprobe-darwin-amd64-sources.tar.gz"
+        )
+        .is_none());
+        assert!(super::archive_rank("app-linux-amd64.sha256").is_none());
+    }
+
+    #[test]
     fn candidate_recipe_infers_release_methods_from_assets() {
         let repo = crate::github::RepoSummary {
             name: "solidcraft".to_string(),
             html_url: "https://github.com/tangency-labs/solidcraft".to_string(),
             description: Some("CAD".to_string()),
+            homepage: Some("https://solidcraft.example".to_string()),
+            logo: Some(
+                "https://raw.githubusercontent.com/tangency-labs/solidcraft/main/assets/app-icon.png"
+                    .to_string(),
+            ),
         };
         let asset = |name: &str| crate::github::ReleaseAsset {
             name: name.to_string(),

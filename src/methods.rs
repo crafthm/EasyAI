@@ -89,7 +89,16 @@ pub fn start(
         )?;
         return wait_for_health(ctx.method, log);
     }
-    let command = service_command(ctx, record)?;
+    let command = match ctx.method.service.as_ref() {
+        Some(_) => service_command(ctx, record)?,
+        None => detect_launch_command(Path::new(&record.install_dir), &ctx.recipe.name)
+            .ok_or_else(|| {
+                format!(
+                    "Method '{}' has no start command and no executable named after the app was found in {}.",
+                    ctx.method.id, record.install_dir
+                )
+            })?,
+    };
     let logs = probe::logs_dir(ctx.app_data);
     fs::create_dir_all(&logs)
         .map_err(|err| format!("Failed to create log directory: {err}"))?;
@@ -126,9 +135,89 @@ pub fn start(
     });
     write_pid(ctx.app_data, &ctx.recipe.id, pid)?;
     log.log(format!("Started process {pid}."));
-    wait_for_health(ctx.method, log)?;
-    log.log("Health check passed.");
+    if ctx.method.service.is_some() {
+        wait_for_health(ctx.method, log)?;
+        log.log("Health check passed.");
+    } else {
+        log.log("Started without health monitoring.");
+    }
     Ok(())
+}
+
+/// Finds the app's own executable inside an install directory for methods that
+/// declare no start command. Only name-matching binaries are considered, so a
+/// bundled helper is not launched by accident.
+fn detect_launch_command(install_dir: &Path, app_name: &str) -> Option<Vec<String>> {
+    let wanted = app_name.trim().to_ascii_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+
+    let mut best: Option<(u32, PathBuf)> = None;
+    walk_executables(install_dir, 0, &mut |path| {
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let named = if stem == wanted {
+            0
+        } else if !stem.is_empty() && (stem.contains(&wanted) || wanted.contains(&stem)) {
+            1
+        } else if path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("appimage"))
+        {
+            2
+        } else {
+            return;
+        };
+        let score = named * 1000 + path.components().count() as u32;
+        if best.as_ref().is_none_or(|(current, _)| score < *current) {
+            best = Some((score, path.to_path_buf()));
+        }
+    });
+
+    best.map(|(_, path)| vec![path.to_string_lossy().to_string()])
+}
+
+fn walk_executables(dir: &Path, depth: usize, visit: &mut impl FnMut(&Path)) {
+    if depth > 4 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+            if name.starts_with('.') || name == "node_modules" || name == "__pycache__" {
+                continue;
+            }
+            walk_executables(&path, depth + 1, visit);
+        } else if file_type.is_file() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if entry
+                    .metadata()
+                    .map(|meta| meta.permissions().mode() & 0o111 != 0)
+                    .unwrap_or(false)
+                {
+                    visit(&path);
+                }
+            }
+        }
+    }
+}
+
+pub fn has_health(method: &Method) -> bool {
+    method.service.is_some()
 }
 
 pub fn stop(
@@ -917,10 +1006,19 @@ fn installed(ctx: &MethodContext<'_>, version: String, install_dir: String) -> I
 }
 
 fn verify_binary(ctx: &MethodContext<'_>, app: &InstalledApp, log: &mut JobLogger) -> Result<(), String> {
-    let command = service_command(ctx, app)?;
-    if command.is_empty() {
+    // Recipes without a managed service have no command to probe; skipping
+    // verification must not fail the install.
+    let Some(service) = ctx.method.service.as_ref() else {
+        return Ok(());
+    };
+    if service.command.is_empty() {
         return Ok(());
     }
+    let command = expand_command(
+        &service.command,
+        app,
+        &probe::app_dir(ctx.app_data, &ctx.recipe.id),
+    );
     let output = run_command(
         &[command[0].clone(), "--version".to_string()],
         None,
@@ -1342,6 +1440,14 @@ fn extract(archive: &Path, destination: &Path) -> Result<(), String> {
                     .map_err(|err| format!("Failed to create {}: {err}", out.display()))?;
                 io::copy(&mut entry, &mut output)
                     .map_err(|err| format!("Failed to extract {}: {err}", out.display()))?;
+                #[cfg(unix)]
+                if let Some(mode) = entry.unix_mode() {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(
+                        &out,
+                        fs::Permissions::from_mode(mode),
+                    );
+                }
             }
         }
         return Ok(());
@@ -1443,13 +1549,36 @@ fn normalize_version(tag: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        container_image, container_run_command, expand_command, manager_install,
-        manager_uninstall, read_bom, write_bom, Bom,
+        container_image, container_run_command, detect_launch_command, expand_command,
+        manager_install, manager_uninstall, read_bom, write_bom, Bom,
     };
     use crate::catalog::{ImageSpec, Method, MethodKind};
     use serde_json::json;
 
-    fn container_method() -> Method {
+    #[test]
+fn detects_launch_binary_by_app_name() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = std::env::temp_dir().join(format!(
+        "easyai-launch-test-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("BeefTV-linux")).unwrap();
+    let binary = dir.join("BeefTV-linux/BeefTV");
+    std::fs::write(&binary, b"#!/bin/sh\n").unwrap();
+    let mut permissions = std::fs::metadata(&binary).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&binary, permissions).unwrap();
+    std::fs::write(dir.join("BeefTV-linux/README.md"), b"readme").unwrap();
+
+    let command = detect_launch_command(&dir, "BeefTV").unwrap();
+    assert!(command[0].ends_with("BeefTV-linux/BeefTV"));
+
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+fn container_method() -> Method {
         serde_json::from_value(json!({
             "id": "container",
             "kind": "container",
@@ -1569,6 +1698,13 @@ mod tests {
             writer.start_file("hello.txt", options).unwrap();
             use std::io::Write;
             writer.write_all(b"hello").unwrap();
+            writer
+                .start_file(
+                    "bin/app",
+                    zip::write::SimpleFileOptions::default().unix_permissions(0o755),
+                )
+                .unwrap();
+            writer.write_all(b"#!/bin/sh\n").unwrap();
             writer.finish().unwrap();
         }
         let zip_out = directory.join("zip-out");
@@ -1576,6 +1712,15 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(zip_out.join("hello.txt")).unwrap(),
             "hello"
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert!(
+            std::fs::metadata(zip_out.join("bin/app"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
         );
 
         let tar_path = directory.join("bundle.tar.gz");

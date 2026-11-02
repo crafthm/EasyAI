@@ -165,6 +165,21 @@ pub struct RepoSummary {
     pub name: String,
     pub html_url: String,
     pub description: Option<String>,
+    pub homepage: Option<String>,
+    pub logo: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct GithubTree {
+    #[serde(default)]
+    tree: Vec<GithubTreeEntry>,
+}
+
+#[derive(Deserialize)]
+struct GithubTreeEntry {
+    path: String,
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Deserialize)]
@@ -208,11 +223,93 @@ pub fn latest_release(owner: &str, name: &str) -> Result<Option<ReleaseInfo>, St
 
 pub fn repo_summary(owner: &str, name: &str) -> Result<RepoSummary, String> {
     let repo = fetch_repo(owner, name)?;
+    let logo = repo
+        .default_branch
+        .as_deref()
+        .and_then(|branch| find_logo(owner, name, branch).ok().flatten());
     Ok(RepoSummary {
         name: repo.name,
         html_url: repo.html_url,
         description: repo.description,
+        homepage: repo
+            .homepage
+            .filter(|url| url.starts_with("http://") || url.starts_with("https://")),
+        logo,
     })
+}
+
+/// Finds the project's own logo in the repository, which is more accurate than
+/// the owner avatar for personal accounts.
+fn find_logo(owner: &str, name: &str, branch: &str) -> Result<Option<String>, String> {
+    let response = http_client()?
+        .get(format!(
+            "https://api.github.com/repos/{owner}/{name}/git/trees/{branch}?recursive=1"
+        ))
+        .send()
+        .map_err(|err| format!("Could not reach GitHub: {err}"))?;
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+    let tree = response
+        .json::<GithubTree>()
+        .map_err(|err| format!("Invalid repository tree from GitHub: {err}"))?;
+
+    let path = tree
+        .tree
+        .iter()
+        .filter(|entry| entry.kind == "blob")
+        .filter_map(|entry| logo_score(&entry.path).map(|score| (score, &entry.path)))
+        .min_by_key(|(score, path)| (*score, path.len()))
+        .map(|(_, path)| path.clone());
+
+    Ok(path.map(|path| {
+        format!("https://raw.githubusercontent.com/{owner}/{name}/{branch}/{path}")
+    }))
+}
+
+/// Lower scores win. `None` excludes the file.
+fn logo_score(path: &str) -> Option<u32> {
+    let lower = path.to_ascii_lowercase();
+    if [
+        "readme/", "screenshot", "testdata", "tests/", "docs/", "donation", "qr", "button",
+        "partner", "social", "banner", "preview",
+    ]
+    .iter()
+    .any(|part| lower.contains(part))
+    {
+        return None;
+    }
+
+    let file = lower.rsplit('/').next()?;
+    let stem = file.split('.').next().unwrap_or(file);
+    let extension = if lower.ends_with(".svg") {
+        0
+    } else if lower.ends_with(".png") {
+        1
+    } else if lower.ends_with(".webp") {
+        2
+    } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
+        3
+    } else if lower.ends_with(".ico") {
+        4
+    } else {
+        return None;
+    };
+
+    let name = if matches!(stem, "app-icon" | "appicon" | "app-logo" | "logo" | "icon") {
+        0
+    } else if stem.contains("logo") {
+        1
+    } else if stem.contains("favicon") {
+        3
+    } else if stem.contains("icon") || stem.contains("mark") {
+        2
+    } else {
+        return None;
+    };
+
+    let depth = path.matches('/').count() as u32;
+    Some(name * 100 + depth * 10 + extension)
 }
 
 fn fetch_repo(owner: &str, name: &str) -> Result<GithubRepo, String> {
@@ -263,7 +360,7 @@ fn fetch_readme(owner: &str, name: &str) -> Result<Vec<u8>, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_repo_url;
+    use super::{logo_score, parse_repo_url};
 
     #[test]
     fn parses_supported_urls() {
@@ -278,6 +375,18 @@ mod tests {
                 ("owner".to_string(), "repo".to_string())
             );
         }
+    }
+
+    #[test]
+    fn logo_score_prefers_app_icons_and_ignores_readme_assets() {
+        let app_icon = logo_score("assets/app-icon.svg").unwrap();
+        assert!(app_icon < logo_score("assets/app-icon.png").unwrap());
+        assert!(
+            app_icon < logo_score("web/public/beef-logo.png").unwrap()
+        );
+        assert!(logo_score("assets/readme/beeftv-2.0.1-skills.webp").is_none());
+        assert!(logo_score("docs/public/images/canvas-version-history.png").is_none());
+        assert!(logo_score("README.md").is_none());
     }
 
     #[test]

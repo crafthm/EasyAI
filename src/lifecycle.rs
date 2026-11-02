@@ -46,6 +46,7 @@ pub struct AppDetail {
     pub method_kind: Option<String>,
     pub managed: bool,
     pub health_ok: bool,
+    pub health_monitored: bool,
     pub source_url: Option<String>,
     pub provenance_json: Option<String>,
     pub bom_path: Option<String>,
@@ -59,12 +60,10 @@ pub fn list_apps(
 ) -> Result<Vec<AppSummary>, String> {
     list_apps_with(db_path, app_data, jobs, |recipe, record| {
         let Some(method) = method_for(recipe, record) else {
-            return (false, false);
+            return (false, None);
         };
-        (
-            methods::is_running(method, record, app_data),
-            methods::health(method),
-        )
+        let health = methods::has_health(method).then(|| methods::health(method));
+        (methods::is_running(method, record, app_data), health)
     })
 }
 
@@ -72,7 +71,7 @@ fn list_apps_with(
     db_path: &Path,
     app_data: &Path,
     jobs: &JobManager,
-    probe_fn: impl Fn(&Recipe, &InstalledApp) -> (bool, bool),
+    probe_fn: impl Fn(&Recipe, &InstalledApp) -> (bool, Option<bool>),
 ) -> Result<Vec<AppSummary>, String> {
     let entries = crate::catalog::entries(app_data)?;
     let installed: HashMap<String, InstalledApp> = db::list_installed(db_path)
@@ -156,7 +155,8 @@ pub fn get_app_detail(
         .as_ref()
         .and_then(|record| method_for(&recipe, record));
 
-    let healthy = method.map(methods::health).unwrap_or(false);
+    let health_monitored = method.is_some_and(methods::has_health);
+    let healthy = health_monitored.then(|| method.is_some_and(methods::health));
     let running = record
         .as_ref()
         .zip(method)
@@ -188,7 +188,8 @@ pub fn get_app_detail(
         method_id: record.as_ref().and_then(|app| app.method_id.clone()),
         method_kind: record.as_ref().and_then(|app| app.method_kind.clone()),
         managed,
-        health_ok: healthy,
+        health_ok: healthy.unwrap_or(false),
+        health_monitored,
         source_url,
         provenance_json: record.as_ref().and_then(|app| app.provenance_json.clone()),
         bom_path: record.as_ref().and_then(|app| app.bom_path.clone()),
@@ -199,13 +200,15 @@ pub fn get_app_detail(
 pub fn reconcile(
     record: Option<&InstalledApp>,
     running: bool,
-    health_ok: bool,
+    health_ok: Option<bool>,
 ) -> (String, bool) {
     match record {
         None => ("not_installed".to_string(), true),
-        Some(_) if running && health_ok => ("running".to_string(), true),
-        Some(_) if running => ("failed".to_string(), true),
-        Some(_) if health_ok => ("running".to_string(), false),
+        Some(_) if running => match health_ok {
+            Some(false) => ("failed".to_string(), true),
+            _ => ("running".to_string(), true),
+        },
+        Some(_) if health_ok == Some(true) => ("running".to_string(), false),
         Some(_) => ("stopped".to_string(), true),
     }
 }
@@ -230,10 +233,11 @@ pub fn refresh_states(
         let Some(method) = method_for(&recipe.recipe, &record) else {
             continue;
         };
+        let health = methods::has_health(method).then(|| methods::health(method));
         let (state, managed) = reconcile(
             Some(&record),
             methods::is_running(method, &record, app_data),
-            methods::health(method),
+            health,
         );
         if state != record.state || managed != record.managed {
             db::update_installed_state(db_path, &record.app_id, &state, managed)
@@ -302,7 +306,11 @@ pub fn start(
             db::update_installed_state(db_path, &recipe.id, "running", true)
                 .map_err(|err| format!("Failed to update application state: {err}"))?;
             jobs::emit_state(app, &recipe.id, "running", Some(&record.version), true);
-            log.log("Health check passed.");
+            if method.service.is_some() {
+                log.log("Health check passed.");
+            } else {
+                log.log("Started without health monitoring.");
+            }
             Ok(())
         }
         Err(err) => {
@@ -421,17 +429,31 @@ mod tests {
     fn reconciliation_covers_every_combination() {
         let app = record();
         assert_eq!(
-            reconcile(None, false, false),
+            reconcile(None, false, None),
             ("not_installed".to_string(), true)
         );
-        assert_eq!(reconcile(Some(&app), true, true), ("running".to_string(), true));
-        assert_eq!(reconcile(Some(&app), true, false), ("failed".to_string(), true));
         assert_eq!(
-            reconcile(Some(&app), false, true),
+            reconcile(Some(&app), true, Some(true)),
+            ("running".to_string(), true)
+        );
+        assert_eq!(
+            reconcile(Some(&app), true, Some(false)),
+            ("failed".to_string(), true)
+        );
+        assert_eq!(
+            reconcile(Some(&app), true, None),
+            ("running".to_string(), true)
+        );
+        assert_eq!(
+            reconcile(Some(&app), false, Some(true)),
             ("running".to_string(), false)
         );
         assert_eq!(
-            reconcile(Some(&app), false, false),
+            reconcile(Some(&app), false, Some(false)),
+            ("stopped".to_string(), true)
+        );
+        assert_eq!(
+            reconcile(Some(&app), false, None),
             ("stopped".to_string(), true)
         );
     }
@@ -505,14 +527,14 @@ mod tests {
         std::fs::create_dir_all(&data_dir).unwrap();
         let jobs = JobManager::new();
 
-        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, false)).unwrap();
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].id, "ollama");
         assert_eq!(apps[0].state, "not_installed");
         assert!(apps[0].version.is_none());
 
         db::upsert_installed(&path, &record()).unwrap();
-        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, false)).unwrap();
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].state, "stopped");
         assert_eq!(apps[0].version.as_deref(), Some("1.0.0"));
@@ -521,7 +543,7 @@ mod tests {
         let mut ghost = record();
         ghost.app_id = "ghost".to_string();
         db::upsert_installed(&path, &ghost).unwrap();
-        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, false)).unwrap();
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].id, "ollama");
 

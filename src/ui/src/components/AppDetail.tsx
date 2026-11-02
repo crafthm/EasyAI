@@ -262,7 +262,11 @@ export function AppDetail({
             <div className="detail-row">
               <span>Health</span>
               <span>
-                {detail.healthOk ? 'Responding' : 'Not responding'}
+                {detail.healthMonitored
+                  ? detail.healthOk
+                    ? 'Responding'
+                    : 'Not responding'
+                  : 'Not monitored'}
               </span>
             </div>
             {detail.sourceUrl && (
@@ -324,6 +328,19 @@ export function AppDetail({
         {detail && detail.state !== 'not_installed' && usage && (
           <div className="usage-section">
             <h3 className="detail-section-title">Use</h3>
+            {usage.website && (
+              <div className="usage-row">
+                <span className="usage-label">Website</span>
+                <code className="usage-value">{usage.website}</code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() => void handleOpen(usage.website!)}
+                >
+                  Open
+                </button>
+              </div>
+            )}
             {usage.ui_url && (
               <div className="usage-row">
                 <span className="usage-label">Web UI</span>
