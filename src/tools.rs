@@ -77,6 +77,36 @@ pub const TOOLS: &[ToolSpec] = &[
         inputs: &["app_id", "url"],
     },
     ToolSpec {
+        name: "open_local_url",
+        description: "Open a detected local URL in the system browser.",
+        mutating: false,
+        inputs: &["url"],
+    },
+    ToolSpec {
+        name: "usage_check",
+        description: "Validate and verify an installed application's usage entry points.",
+        mutating: false,
+        inputs: &["app_id"],
+    },
+    ToolSpec {
+        name: "get_usage_report",
+        description: "Read stored usage verification results for an application.",
+        mutating: false,
+        inputs: &["app_id"],
+    },
+    ToolSpec {
+        name: "discover_usage",
+        description: "Detect likely usage entry points for a running application.",
+        mutating: false,
+        inputs: &["app_id"],
+    },
+    ToolSpec {
+        name: "reinfer_usage",
+        description: "Re-infer category and launch usage for an imported recipe.",
+        mutating: true,
+        inputs: &["app_id", "origin", "confirmed"],
+    },
+    ToolSpec {
         name: "get_method_settings",
         description: "Read the install-tier priority settings.",
         mutating: false,
@@ -148,9 +178,14 @@ mod tests {
             "import_recipe",
             "remove_recipe",
             "open_url",
+            "open_local_url",
             "get_bom",
             "get_method_settings",
             "save_method_settings",
+            "usage_check",
+            "get_usage_report",
+            "discover_usage",
+            "reinfer_usage",
         ] {
             assert!(spec(name).is_some(), "missing tool {name}");
         }

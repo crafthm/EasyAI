@@ -192,6 +192,8 @@ pub struct ReleaseInfo {
 #[derive(Deserialize)]
 pub struct ReleaseAsset {
     pub name: String,
+    #[serde(default)]
+    pub size: u64,
 }
 
 /// Latest published (non-prerelease) release, or `None` when the repository

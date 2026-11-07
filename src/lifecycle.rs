@@ -147,13 +147,15 @@ pub fn get_app_detail(
 ) -> Result<AppDetail, String> {
     let entry = crate::catalog::find(app_data, app_id)?;
     let source_url = entry.source.map(|source| source.url);
-    let usage = entry.recipe.usage.clone();
     let recipe = entry.recipe;
     let record = db::get_installed(db_path, app_id)
         .map_err(|err| format!("Failed to load application state: {err}"))?;
     let method = record
         .as_ref()
         .and_then(|record| method_for(&recipe, record));
+    let usage = method
+        .and_then(|method| recipe.effective_usage(method))
+        .or_else(|| recipe.usage.clone());
 
     let health_monitored = method.is_some_and(methods::has_health);
     let healthy = health_monitored.then(|| method.is_some_and(methods::health));

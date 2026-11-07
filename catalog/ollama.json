@@ -5,6 +5,7 @@
   "glyph": "O",
   "color": "linear-gradient(135deg, #6366f1, #8b5cf6)",
   "platforms": ["linux-x86_64", "linux-aarch64", "macos-aarch64", "macos-x86_64"],
+  "category": "llm-runtime",
   "methods": [
     {
       "id": "release-linux",
@@ -63,6 +64,9 @@
       },
       "uninstall": {
         "native": true
+      },
+      "usage": {
+        "cli": []
       }
     },
     {
@@ -102,14 +106,17 @@
     "docs_url": "https://docs.ollama.com",
     "cli": [
       {
+        "id": "cli-pull",
         "label": "Pull a model",
         "command": "ollama pull llama3.2"
       },
       {
+        "id": "cli-run",
         "label": "Run a model",
         "command": "ollama run llama3.2"
       },
       {
+        "id": "cli-list",
         "label": "List models",
         "command": "ollama list"
       }

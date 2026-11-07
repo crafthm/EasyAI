@@ -18,17 +18,20 @@ the concrete changes EasyAI needs.
 
 A usage declaration covers these dimensions:
 
-| Dimension | Content | Example |
-|---|---|---|
-| Web UI | URL, first-run path, whether login is required | Open WebUI `http://127.0.0.1:3000` |
-| API | Base URL, OpenAI-compatible URL, OpenAPI document | Ollama `http://127.0.0.1:11434/v1` |
-| CLI | Copyable commands, working directory, prerequisites | `ollama pull llama3.2` |
-| First run | Pull a model, create an admin, open a workspace | Open WebUI initial setup |
-| Models / data | Model directory, data directory, import method | ComfyUI `models/` |
-| Documentation | Quick start and reference links | `https://docs.ollama.com` |
-| Pairings | Recommended companion apps | Ollama + Open WebUI |
-| Lifecycle details | Port, health endpoint, log location, stop method | `8188`, `/system_stats` |
-| Differences | Per method, version, and platform | Docker `3000:8080` vs pip `8080` |
+| Dimension | Content | Example | LLM role |
+| --- | --- | --- | --- |
+| Web UI | URL, first-run path, whether login is required | Open WebUI `http://127.0.0.1:3000` | Optional: explain the first-run path |
+| API | Base URL, OpenAI-compatible URL, OpenAPI document | Ollama `http://127.0.0.1:11434/v1` | Optional: draft curl/Python examples |
+| CLI | Copyable commands, working directory, prerequisites | `ollama pull llama3.2` | Optional: polish command explanations |
+| First run | Pull a model, create an admin, open a workspace | Open WebUI initial setup | Mainly LLM/human: extract and order steps from docs |
+| Models / data | Model directory, data directory, import method | ComfyUI `models/` | Optional: explain where models go and how to import |
+| Documentation | Quick start and reference links | `https://docs.ollama.com` | Optional: choose quick start vs reference |
+| Pairings | Recommended companion apps | Ollama + Open WebUI | Suitable for LLM suggestions; a human confirms compatibility |
+| Lifecycle details | Port, health endpoint, log location, stop method | `8188`, `/system_stats` | Optional: explain logs or failures |
+| Differences | Per method, version, and platform | Docker `3000:8080` vs pip `8080` | Optional: summarize differences; never replaces probing |
+
+The LLM role is optional and limited to drafts. Facts come from deterministic extraction and runtime
+verification; Section 9 defines the boundary.
 
 ## 3. Usage must be method-scoped
 
@@ -294,7 +297,49 @@ accuracy.**
 | P2 | Verification runner, CI gates, coverage dashboard | Coverage becomes measurable |
 | P3 | Runtime discovery, LLM draft extraction, user feedback loop | Coverage grows continuously |
 
-## 12. Acceptance criteria
+## 12. Current deterministic implementation
+
+The deterministic part is implemented as `deterministic-usage-guidance`:
+
+- **Recipe fields**: optional `category` (`llm-runtime`, `web-ui`, `image-generation`, `cli-tool`,
+  `desktop-app`), recipe-level `usage` defaults, and `methods[].usage` overrides.
+- **Stable ids**: fixed ids for `website`, `ui`, `api-base`, `openai-base`, `api-docs`, and `docs`;
+  CLI items use an explicit `id` or a deterministic `cli-<slug>` id. Duplicate ids are rejected.
+- **Storage**: `usage_checks` keys results by `app_id`, `method_id`, `version`, and `item_id`.
+- **Checks**: `usage_check` runs static validation and, when the app is running, bounded HTTP and
+  CLI `--help` probes. `get_usage_report` reads stored results.
+- **States**: `verified`, `stale`, `failed`, and `unverified` are computed from the method, version,
+  and status. Results for another version or method are stale.
+- **Discovery**: `discover_usage` finds Linux listening ports owned by the app and probes common
+  HTTP paths. Detected entries are never marked verified and are not written back to recipes.
+- **UI**: usage rows show state badges; a Verify action runs the check; detected entries appear in a
+  separate section.
+
+The LLM-dependent items in Section 9 and the Roadmap remain deferred.
+
+## 13. Archive-based inference (implemented)
+
+Imported recipes now inspect the release archive for the current platform before falling back to
+the repository homepage:
+
+- **Static inspection only**: zip, tar.gz/tgz, and tar.zst entries are listed; only small text
+  files are read. No downloaded binary is executed.
+- **Bounds**: 200 MiB archive size, 64 KiB per text file, 32 text files. Oversized or unsupported
+  archives are skipped with a warning; the import still succeeds.
+- **Launch inference**: executable mode, platform extensions (`.exe`, `.bat`, `.cmd`, `.ps1`,
+  `.appimage`, `.app/Contents/MacOS/...`), name similarity to the application, archive depth, and
+  helper/library exclusions.
+- **Category inference**: desktop, web UI, image generation, LLM runtime, CLI tool; no match leaves
+  the category empty.
+- **Inferred metadata**: `usage.launch`, `usage.inferred`, `usage.source`, `usage.confidence`.
+  Inferred values are never verified by inference.
+- **Re-analyze**: imported recipes can re-run inference without reinstalling; bundled recipes are
+  rejected.
+
+BeefTV is the regression case: a desktop archive containing `BeefTV-linux/BeefTV` yields
+`desktop-app` and a launch command instead of homepage-only usage.
+
+## 14. Acceptance criteria
 
 - Every bundled application has method-scoped usage with stable ids.
 - Every verified usage item records version, method, timestamp, and checks.

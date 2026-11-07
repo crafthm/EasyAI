@@ -10,6 +10,8 @@ mod methods;
 mod probe;
 mod resolve;
 mod tools;
+mod usage;
+mod usage_infer;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,6 +67,11 @@ fn main() {
             commands::remove_recipe,
             commands::get_bom,
             commands::open_url,
+            commands::open_local_url,
+            commands::usage_check,
+            commands::get_usage_report,
+            commands::discover_usage,
+            commands::reinfer_usage,
             commands::get_method_settings,
             commands::save_method_settings,
             commands::list_tools

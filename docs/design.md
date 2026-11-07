@@ -295,7 +295,17 @@ a **Use** section; recipes without usage show no empty panel.
 - API base and OpenAI-compatible base have Copy actions.
 - CLI examples are copyable; docs URLs open in the system browser.
 - `open_url(app_id, url)` only opens URLs declared by the recipe; arbitrary URLs are rejected.
+- Usage is method-scoped: recipe-level defaults merged with `methods[].usage`, with stable item ids.
+- `usage_check` records verified/stale/failed/unverified per app, method, version, and item;
+  `get_usage_report` reads the stored results.
+- `discover_usage` finds Linux listening ports and probes common HTTP paths; detected entries are
+  shown separately and never treated as verified.
+- Imported recipes statically inspect the current-platform release archive (zip/tar, bounded, no
+  execution) to infer a category and launch command; inferred values carry source/confidence and
+  are marked Inferred.
+- Imported recipes can be re-analyzed without reinstalling; bundled recipes cannot.
 - Model listing/pulling, embedded terminals, and partner-app pairing are follow-up phases.
+- LLM-based extraction, pairing suggestions, and explanations remain deferred.
 - Accuracy, verification, and coverage workflow: [usage-guidance-strategy.md](usage-guidance-strategy.md).
 
 ### 4.5 Versions and upgrades

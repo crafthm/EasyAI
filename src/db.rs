@@ -62,6 +62,17 @@ CREATE TABLE IF NOT EXISTS settings (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS usage_checks (
+    app_id       TEXT NOT NULL,
+    method_id    TEXT NOT NULL,
+    version      TEXT NOT NULL,
+    item_id      TEXT NOT NULL,
+    status       TEXT NOT NULL,
+    checked_at   TEXT NOT NULL,
+    details_json TEXT NOT NULL,
+    PRIMARY KEY (app_id, method_id, version, item_id)
+);
 "#;
 
 #[derive(Clone, Debug)]
@@ -76,6 +87,15 @@ pub struct InstalledApp {
     pub method_kind: Option<String>,
     pub provenance_json: Option<String>,
     pub bom_path: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct UsageCheckRecord {
+    pub version: String,
+    pub item_id: String,
+    pub status: String,
+    pub checked_at: String,
+    pub details_json: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -341,6 +361,60 @@ pub fn get_setting(path: &Path, key: &str) -> rusqlite::Result<Option<String>> {
     }
 }
 
+pub fn upsert_usage_check(
+    path: &Path,
+    app_id: &str,
+    method_id: &str,
+    version: &str,
+    item_id: &str,
+    status: &str,
+    checked_at: &str,
+    details_json: &str,
+) -> rusqlite::Result<()> {
+    let conn = Connection::open(path)?;
+    conn.execute(
+        "INSERT INTO usage_checks
+            (app_id, method_id, version, item_id, status, checked_at, details_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+         ON CONFLICT(app_id, method_id, version, item_id) DO UPDATE SET
+            status = excluded.status,
+            checked_at = excluded.checked_at,
+            details_json = excluded.details_json",
+        params![
+            app_id,
+            method_id,
+            version,
+            item_id,
+            status,
+            checked_at,
+            details_json
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_usage_checks(
+    path: &Path,
+    app_id: &str,
+    method_id: &str,
+) -> rusqlite::Result<Vec<UsageCheckRecord>> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "SELECT version, item_id, status, checked_at, details_json
+         FROM usage_checks WHERE app_id = ?1 AND method_id = ?2",
+    )?;
+    let rows = statement.query_map(params![app_id, method_id], |row| {
+        Ok(UsageCheckRecord {
+            version: row.get(0)?,
+            item_id: row.get(1)?,
+            status: row.get(2)?,
+            checked_at: row.get(3)?,
+            details_json: row.get(4)?,
+        })
+    })?;
+    rows.collect()
+}
+
 pub fn set_setting(path: &Path, key: &str, value: &str) -> rusqlite::Result<()> {
     let conn = Connection::open(path)?;
     conn.execute(
@@ -525,12 +599,12 @@ mod tests {
             .query_row(
                 "SELECT count(*) FROM sqlite_master
                  WHERE type = 'table'
-                   AND name IN ('github_repos', 'installed_apps', 'jobs', 'settings')",
+                   AND name IN ('github_repos', 'installed_apps', 'jobs', 'settings', 'usage_checks')",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(count, 4);
+        assert_eq!(count, 5);
 
         drop(conn);
         std::fs::remove_file(&path).unwrap();
@@ -632,6 +706,43 @@ mod tests {
             get_setting(&path, "method_tiers").unwrap().as_deref(),
             Some("{\"order\":[\"T0\"]}")
         );
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn usage_checks_roundtrip() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-usage-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        init(&path).unwrap();
+        upsert_usage_check(
+            &path,
+            "ollama",
+            "release-linux",
+            "1.0.0",
+            "api-base",
+            "ok",
+            "1",
+            "{\"http_status\":200}",
+        )
+        .unwrap();
+        upsert_usage_check(
+            &path,
+            "ollama",
+            "release-linux",
+            "1.0.0",
+            "api-base",
+            "failed",
+            "2",
+            "{\"error\":\"timeout\"}",
+        )
+        .unwrap();
+        let records = list_usage_checks(&path, "ollama", "release-linux").unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].status, "failed");
+        assert_eq!(records[0].checked_at, "2");
         std::fs::remove_file(&path).unwrap();
     }
 

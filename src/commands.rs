@@ -11,6 +11,8 @@ use crate::lifecycle::{self, AppDetail, AppSummary};
 use crate::probe;
 use crate::resolve::{self, InstallPlan, MethodSettings, Preferences, TIERS};
 use crate::tools::{self, ToolSpec};
+use crate::usage::{self, DetectedEntry, UsageReport};
+use crate::usage_infer;
 use crate::AppState;
 
 fn authorize(
@@ -58,11 +60,11 @@ fn plan_for(
     Ok((recipe, method, plan))
 }
 
-fn installed_method(
+fn installed_context(
     db_path: &Path,
     app_data: &Path,
     app_id: &str,
-) -> Result<(Recipe, Method, String), String> {
+) -> Result<(Recipe, Method, db::InstalledApp), String> {
     let recipe = catalog::find(app_data, app_id)?.recipe;
     let record = db::get_installed(db_path, app_id)
         .map_err(|err| format!("Failed to load application state: {err}"))?
@@ -70,6 +72,15 @@ fn installed_method(
     let method = lifecycle::method_for(&recipe, &record)
         .cloned()
         .ok_or_else(|| "The installed method is no longer present in the recipe.".to_string())?;
+    Ok((recipe, method, record))
+}
+
+fn installed_method(
+    db_path: &Path,
+    app_data: &Path,
+    app_id: &str,
+) -> Result<(Recipe, Method, String), String> {
+    let (recipe, method, _) = installed_context(db_path, app_data, app_id)?;
     let method_id = method.id.clone();
     Ok((recipe, method, method_id))
 }
@@ -430,17 +441,41 @@ pub async fn open_url(
     url: String,
 ) -> Result<(), String> {
     let app_data = state.app_data_dir.clone();
+    let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let recipe = catalog::find(&app_data, &app_id)?.recipe;
-        let usage = recipe
-            .usage
+        let record = db::get_installed(&db_path, &app_id).ok().flatten();
+        let usage = record
             .as_ref()
+            .and_then(|record| lifecycle::method_for(&recipe, record))
+            .and_then(|method| recipe.effective_usage(method))
+            .or_else(|| recipe.usage.clone())
             .ok_or_else(|| "This application declares no usage URLs.".to_string())?;
         if !usage.declares(&url) {
             return Err("This URL is not declared by the application's recipe.".to_string());
         }
         if !(url.starts_with("http://") || url.starts_with("https://")) {
             return Err("Only http and https URLs can be opened.".to_string());
+        }
+        open_external(&url)
+    })
+    .await
+    .map_err(|err| format!("Failed to open the URL: {err}"))?
+}
+
+#[tauri::command]
+pub async fn open_local_url(url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let parsed = reqwest::Url::parse(&url)
+            .map_err(|_| "Enter a valid URL.".to_string())?;
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err("Only http and https URLs can be opened.".to_string());
+        }
+        if !matches!(
+            parsed.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("::1")
+        ) {
+            return Err("Only local URLs can be opened here.".to_string());
         }
         open_external(&url)
     })
@@ -463,6 +498,150 @@ fn open_external(url: &str) -> Result<(), String> {
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("Could not open the URL: {err}"))
+}
+
+#[tauri::command]
+pub async fn usage_check(
+    state: State<'_, AppState>,
+    app_id: String,
+) -> Result<UsageReport, String> {
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (recipe, method, record) =
+            installed_context(&db_path, &app_data, &app_id)?;
+        let running = crate::methods::is_running(&method, &record, &app_data);
+        Ok(usage::run_check(&db_path, &recipe, &method, &record, running))
+    })
+    .await
+    .map_err(|err| format!("Failed to check usage: {err}"))?
+}
+
+#[tauri::command]
+pub async fn get_usage_report(
+    state: State<'_, AppState>,
+    app_id: String,
+) -> Result<UsageReport, String> {
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (recipe, method, record) =
+            installed_context(&db_path, &app_data, &app_id)?;
+        Ok(usage::report(&db_path, &recipe, &method, &record))
+    })
+    .await
+    .map_err(|err| format!("Failed to load the usage report: {err}"))?
+}
+
+#[tauri::command]
+pub async fn discover_usage(
+    state: State<'_, AppState>,
+    app_id: String,
+) -> Result<Vec<DetectedEntry>, String> {
+    let app_data = state.app_data_dir.clone();
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (recipe, method, record) =
+            installed_context(&db_path, &app_data, &app_id)?;
+        Ok(usage::discover(&app_data, &recipe, &method, &record))
+    })
+    .await
+    .map_err(|err| format!("Failed to discover usage entry points: {err}"))?
+}
+
+#[tauri::command]
+pub async fn reinfer_usage(
+    state: State<'_, AppState>,
+    app_id: String,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<(), String> {
+    authorize("reinfer_usage", origin, confirmed)?;
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || reinfer_usage_blocking(&app_data, &app_id))
+        .await
+        .map_err(|err| format!("Failed to re-analyze usage: {err}"))?
+}
+
+fn reinfer_usage_blocking(app_data: &Path, app_id: &str) -> Result<(), String> {
+    let entry = catalog::find(app_data, app_id)?;
+    let source = entry
+        .source
+        .as_ref()
+        .ok_or_else(|| "Only imported recipes can be re-analyzed.".to_string())?;
+    let mut recipe = entry.recipe.clone();
+    let (owner, repo_name) = infer_repo_parts(&recipe, &source.url).ok_or_else(|| {
+        "Could not determine the GitHub repository for this recipe.".to_string()
+    })?;
+    let repo = crate::github::repo_summary(&owner, &repo_name)?;
+    let release = crate::github::latest_release(&owner, &repo_name)?
+        .ok_or_else(|| "The repository has no release to inspect.".to_string())?;
+    let platform = probe::current_platform_id()?;
+    let inference = usage_infer::infer_release(
+        &owner,
+        &repo_name,
+        repo.description.as_deref(),
+        &release,
+        &platform,
+    );
+    if inference.category.is_none() && inference.launch.is_none() && inference.cli.is_empty() {
+        return Err(if inference.warnings.is_empty() {
+            "No usage could be inferred from the release archive.".to_string()
+        } else {
+            inference.warnings.join(" ")
+        });
+    }
+    if inference.category.is_some() {
+        recipe.category = inference.category;
+    }
+    let usage = recipe.usage.get_or_insert_with(Default::default);
+    if usage.website.is_none() {
+        usage.website = repo.homepage.clone();
+    }
+    if let Some(launch) = inference.launch {
+        usage.launch = Some(launch);
+    }
+    if !inference.cli.is_empty() {
+        usage.cli = inference.cli;
+    }
+    usage.inferred = true;
+    usage.source = Some(inference.source);
+    usage.confidence = Some(inference.confidence);
+    catalog::update_imported_recipe(app_data, &recipe)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reinfer_usage_blocking;
+
+    #[test]
+    fn reanalyze_rejects_bundled_recipes() {
+        let directory = std::env::temp_dir().join(format!(
+            "easyai-reinfer-bundled-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let err = reinfer_usage_blocking(&directory, "ollama").unwrap_err();
+        assert!(err.contains("Only imported"), "{err}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+}
+
+fn infer_repo_parts(recipe: &catalog::Recipe, source_url: &str) -> Option<(String, String)> {
+    if let Some(parts) = catalog::parse_github_repo_url(source_url) {
+        return Some(parts);
+    }
+    recipe.methods.iter().find_map(|method| {
+        method
+            .source
+            .as_ref()?
+            .repo
+            .as_ref()?
+            .split_once('/')
+            .map(|(owner, repo)| (owner.to_string(), repo.to_string()))
+    })
 }
 
 #[tauri::command]

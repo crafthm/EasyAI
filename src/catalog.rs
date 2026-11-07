@@ -30,6 +30,8 @@ pub struct Recipe {
     #[serde(default)]
     pub platforms: Vec<String>,
     #[serde(default)]
+    pub category: Option<Category>,
+    #[serde(default)]
     pub methods: Vec<Method>,
     #[serde(default)]
     pub usage: Option<Usage>,
@@ -53,6 +55,28 @@ pub enum MethodKind {
     Source,
     Vcs,
     Universal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Category {
+    LlmRuntime,
+    WebUi,
+    ImageGeneration,
+    CliTool,
+    DesktopApp,
+}
+
+impl Category {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Category::LlmRuntime => "llm-runtime",
+            Category::WebUi => "web-ui",
+            Category::ImageGeneration => "image-generation",
+            Category::CliTool => "cli-tool",
+            Category::DesktopApp => "desktop-app",
+        }
+    }
 }
 
 impl MethodKind {
@@ -93,6 +117,8 @@ pub struct Method {
     pub language: Option<LanguageSpec>,
     pub script: Option<ScriptSpec>,
     pub universal: Option<UniversalSpec>,
+    #[serde(default)]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -153,6 +179,11 @@ pub struct Usage {
     pub docs_url: Option<String>,
     #[serde(default)]
     pub cli: Vec<CliUsage>,
+    pub launch: Option<LaunchUsage>,
+    #[serde(default)]
+    pub inferred: bool,
+    pub source: Option<String>,
+    pub confidence: Option<String>,
     pub notes: Option<String>,
 }
 
@@ -165,8 +196,57 @@ pub struct ApiUsage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CliUsage {
+    #[serde(default)]
+    pub id: Option<String>,
     pub label: String,
     pub command: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LaunchUsage {
+    pub command: String,
+    pub source: Option<String>,
+    pub confidence: Option<String>,
+}
+
+impl CliUsage {
+    pub fn resolved_id(&self) -> String {
+        self.id
+            .clone()
+            .filter(|id| !id.trim().is_empty())
+            .unwrap_or_else(|| format!("cli-{}", slug(&self.label)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageItem {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
+    pub value: String,
+    pub is_url: bool,
+}
+
+fn slug(value: &str) -> String {
+    let mut slug = String::new();
+    let mut last_dash = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            last_dash = false;
+        } else if !last_dash && !slug.is_empty() {
+            slug.push('-');
+            last_dash = true;
+        }
+    }
+    while slug.ends_with('-') {
+        slug.pop();
+    }
+    if slug.is_empty() {
+        "item".to_string()
+    } else {
+        slug
+    }
 }
 
 impl Usage {
@@ -187,7 +267,124 @@ impl Usage {
                 ));
             }
         }
+        let mut ids = HashSet::new();
+        for item in self.items() {
+            if !ids.insert(item.id.clone()) {
+                return Err(format!(
+                    "Recipe '{}' has duplicate usage item id '{}'.",
+                    recipe_id, item.id
+                ));
+            }
+        }
         Ok(())
+    }
+
+    pub fn items(&self) -> Vec<UsageItem> {
+        let mut items = Vec::new();
+        if let Some(url) = &self.website {
+            items.push(UsageItem {
+                id: "website".to_string(),
+                kind: "website".to_string(),
+                label: "Website".to_string(),
+                value: url.clone(),
+                is_url: true,
+            });
+        }
+        if let Some(url) = &self.ui_url {
+            items.push(UsageItem {
+                id: "ui".to_string(),
+                kind: "web-ui".to_string(),
+                label: "Web UI".to_string(),
+                value: url.clone(),
+                is_url: true,
+            });
+        }
+        if let Some(api) = &self.api {
+            if let Some(url) = &api.base_url {
+                items.push(UsageItem {
+                    id: "api-base".to_string(),
+                    kind: "api".to_string(),
+                    label: "API base".to_string(),
+                    value: url.clone(),
+                    is_url: true,
+                });
+            }
+            if let Some(url) = &api.openai_base_url {
+                items.push(UsageItem {
+                    id: "openai-base".to_string(),
+                    kind: "openai".to_string(),
+                    label: "OpenAI-compatible".to_string(),
+                    value: url.clone(),
+                    is_url: true,
+                });
+            }
+            if let Some(url) = &api.docs_url {
+                items.push(UsageItem {
+                    id: "api-docs".to_string(),
+                    kind: "docs".to_string(),
+                    label: "API documentation".to_string(),
+                    value: url.clone(),
+                    is_url: true,
+                });
+            }
+        }
+        if let Some(url) = &self.docs_url {
+            items.push(UsageItem {
+                id: "docs".to_string(),
+                kind: "docs".to_string(),
+                label: "Documentation".to_string(),
+                value: url.clone(),
+                is_url: true,
+            });
+        }
+        for cli in &self.cli {
+            items.push(UsageItem {
+                id: cli.resolved_id(),
+                kind: "cli".to_string(),
+                label: cli.label.clone(),
+                value: cli.command.clone(),
+                is_url: false,
+            });
+        }
+        if let Some(launch) = &self.launch {
+            items.push(UsageItem {
+                id: "launch".to_string(),
+                kind: "launch".to_string(),
+                label: "Launch".to_string(),
+                value: launch.command.clone(),
+                is_url: false,
+            });
+        }
+        items
+    }
+
+    pub fn merge(defaults: Option<&Usage>, overrides: Option<&Usage>) -> Option<Usage> {
+        match (defaults, overrides) {
+            (None, None) => None,
+            (Some(defaults), None) => Some(defaults.clone()),
+            (None, Some(overrides)) => Some(overrides.clone()),
+            (Some(defaults), Some(overrides)) => Some(Usage {
+                ui_url: overrides.ui_url.clone().or_else(|| defaults.ui_url.clone()),
+                website: overrides.website.clone().or_else(|| defaults.website.clone()),
+                api: merge_api(defaults.api.as_ref(), overrides.api.as_ref()),
+                docs_url: overrides
+                    .docs_url
+                    .clone()
+                    .or_else(|| defaults.docs_url.clone()),
+                cli: overrides.cli.clone(),
+                launch: overrides.launch.clone().or_else(|| defaults.launch.clone()),
+                inferred: overrides.inferred || defaults.inferred,
+                source: overrides
+                    .source
+                    .clone()
+                    .or_else(|| defaults.source.clone()),
+                confidence: overrides
+                    .confidence
+                    .clone()
+                    .or_else(|| defaults.confidence.clone()),
+                notes: overrides.notes.clone().or_else(|| defaults.notes.clone()),
+            }),
+        }
     }
 
     pub fn declares(&self, url: &str) -> bool {
@@ -364,7 +561,78 @@ pub struct RecipePreview {
     pub warnings: Vec<String>,
 }
 
+fn category_satisfied(category: Category, usage: &Usage) -> bool {
+    match category {
+        Category::LlmRuntime => {
+            usage.api.as_ref().and_then(|api| api.base_url.as_ref()).is_some()
+                || !usage.cli.is_empty()
+        }
+        Category::WebUi => usage.ui_url.is_some(),
+        Category::ImageGeneration => {
+            usage.ui_url.is_some()
+                && usage
+                    .notes
+                    .as_ref()
+                    .map(|notes| !notes.trim().is_empty())
+                    .unwrap_or(false)
+        }
+        Category::CliTool => !usage.cli.is_empty(),
+        Category::DesktopApp => usage.ui_url.is_some() || usage.website.is_some(),
+    }
+}
+
+fn merge_api(defaults: Option<&ApiUsage>, overrides: Option<&ApiUsage>) -> Option<ApiUsage> {
+    match (defaults, overrides) {
+        (None, None) => None,
+        (Some(defaults), None) => Some(defaults.clone()),
+        (None, Some(overrides)) => Some(overrides.clone()),
+        (Some(defaults), Some(overrides)) => Some(ApiUsage {
+            base_url: overrides
+                .base_url
+                .clone()
+                .or_else(|| defaults.base_url.clone()),
+            openai_base_url: overrides
+                .openai_base_url
+                .clone()
+                .or_else(|| defaults.openai_base_url.clone()),
+            docs_url: overrides
+                .docs_url
+                .clone()
+                .or_else(|| defaults.docs_url.clone()),
+        }),
+    }
+}
+
 impl Recipe {
+    pub fn effective_usage(&self, method: &Method) -> Option<Usage> {
+        Usage::merge(self.usage.as_ref(), method.usage.as_ref())
+    }
+
+    fn validate_category(&self) -> Result<(), String> {
+        let Some(category) = self.category else {
+            return Ok(());
+        };
+        let usages: Vec<Usage> = if self.methods.is_empty() {
+            self.usage.iter().cloned().collect()
+        } else {
+            self.methods
+                .iter()
+                .filter_map(|method| self.effective_usage(method))
+                .collect()
+        };
+        if usages
+            .iter()
+            .any(|usage| category_satisfied(category, usage))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "Recipe '{}' category '{}' is missing required usage.",
+            self.id,
+            category.as_str()
+        ))
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         if self.legacy_install.is_some() {
             return Err(format!(
@@ -415,6 +683,12 @@ impl Recipe {
         let mut ids = HashSet::new();
         for method in &self.methods {
             method.validate(&self.id)?;
+            if let Some(usage) = &method.usage {
+                usage.validate(&self.id)?;
+            }
+            if let Some(usage) = self.effective_usage(method) {
+                usage.validate(&self.id)?;
+            }
             if !ids.insert(method.id.clone()) {
                 return Err(format!(
                     "Recipe '{}' declares duplicate method id '{}'.",
@@ -422,6 +696,7 @@ impl Recipe {
                 ));
             }
         }
+        self.validate_category()?;
         Ok(())
     }
 
@@ -869,7 +1144,17 @@ fn preview_draft(
         Ok(release) => (release, None),
         Err(err) => (None, Some(err)),
     };
-    let (recipe, candidate_warnings) = candidate_recipe(&owner, &repo, release.as_ref());
+    let inference = release.as_ref().map(|release| {
+        crate::usage_infer::infer_release(
+            &owner,
+            &repo.name,
+            repo.description.as_deref(),
+            release,
+            platform,
+        )
+    });
+    let (recipe, candidate_warnings) =
+        candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
     let mut warnings = vec![
         "This repository publishes no EasyAI recipe. A candidate recipe was generated from its latest release."
             .to_string(),
@@ -919,7 +1204,18 @@ fn import_draft(
     let (owner, repo_name) = github_repo_from_input(input)?;
     let repo = crate::github::repo_summary(&owner, &repo_name)?;
     let release = crate::github::latest_release(&owner, &repo_name)?;
-    let (recipe, _) = candidate_recipe(&owner, &repo, release.as_ref());
+    let platform = crate::probe::current_platform_id()?;
+    let inference = release.as_ref().map(|release| {
+        crate::usage_infer::infer_release(
+            &owner,
+            &repo.name,
+            repo.description.as_deref(),
+            release,
+            &platform,
+        )
+    });
+    let (recipe, _) =
+        candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     if sha256 != expected_sha256 {
         return Err(
@@ -988,6 +1284,31 @@ pub fn import_recipe(
         recipe,
         source: Some(source),
     })
+}
+
+pub fn update_imported_recipe(
+    app_data: &Path,
+    recipe: &Recipe,
+) -> Result<CatalogEntry, String> {
+    recipe.validate()?;
+    let path = imported_path(app_data, &recipe.id);
+    let raw = fs::read_to_string(&path)
+        .map_err(|err| format!("Failed to read the imported recipe: {err}"))?;
+    let stored: StoredRecipe = serde_json::from_str(&raw)
+        .map_err(|err| format!("Failed to parse the imported recipe: {err}"))?;
+    if stored.recipe.id != recipe.id {
+        return Err("The imported recipe id does not match.".to_string());
+    }
+    store_imported(app_data, recipe, &stored.source)?;
+    Ok(CatalogEntry {
+        recipe: recipe.clone(),
+        source: Some(stored.source),
+    })
+}
+
+pub fn parse_github_repo_url(input: &str) -> Option<(String, String)> {
+    let url = reqwest::Url::parse(input).ok()?;
+    github_repo_parts(&url)
 }
 
 pub fn remove_recipe(app_data: &Path, app_id: &str) -> Result<(), String> {
@@ -1068,6 +1389,7 @@ fn candidate_recipe(
     owner: &str,
     repo: &crate::github::RepoSummary,
     release: Option<&crate::github::ReleaseInfo>,
+    inference: Option<&crate::usage_infer::Inference>,
 ) -> (Recipe, Vec<String>) {
     let full_repo = format!("{owner}/{}", repo.name);
     let mut assets: BTreeMap<String, (u8, String)> = BTreeMap::new();
@@ -1106,10 +1428,34 @@ fn candidate_recipe(
             "Install method inferred from the latest GitHub Release. Review it before installing."
                 .to_string(),
         );
-        warnings.push(
-            "No start command was inferred. Start/Stop will not work until the recipe is edited."
-                .to_string(),
-        );
+        if inference.and_then(|inference| inference.launch.as_ref()).is_none() {
+            warnings.push(
+                "No start command was inferred. Start/Stop will not work until the recipe is edited."
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut usage = repo.homepage.as_ref().map(|homepage| Usage {
+        website: Some(homepage.clone()),
+        ..Default::default()
+    });
+    let category = inference.and_then(|inference| inference.category);
+    if let Some(inference) = inference {
+        if inference.launch.is_some()
+            || !inference.cli.is_empty()
+            || inference.category.is_some()
+        {
+            let usage = usage.get_or_insert_with(Usage::default);
+            if let Some(launch) = &inference.launch {
+                usage.launch = Some(launch.clone());
+            }
+            usage.cli = inference.cli.clone();
+            usage.inferred = true;
+            usage.source = Some(inference.source.clone());
+            usage.confidence = Some(inference.confidence.clone());
+        }
+        warnings.extend(inference.warnings.clone());
     }
 
     let recipe = Recipe {
@@ -1121,11 +1467,9 @@ fn candidate_recipe(
         icon: repo.logo.clone().unwrap_or_default(),
         draft: methods.is_empty(),
         platforms: assets.keys().cloned().collect(),
+        category,
         methods,
-        usage: repo.homepage.as_ref().map(|homepage| Usage {
-            website: Some(homepage.clone()),
-            ..Default::default()
-        }),
+        usage,
         legacy_install: None,
         legacy_service: None,
         legacy_uninstall: None,
@@ -1175,6 +1519,7 @@ fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
         language: None,
         script: None,
         universal: None,
+        usage: None,
     }
 }
 
@@ -1445,6 +1790,14 @@ mod tests {
         assert!(usage.declares("http://127.0.0.1:11434"));
         assert!(usage.declares("http://127.0.0.1:11434/v1"));
         assert_eq!(usage.cli.len(), 3);
+        assert_eq!(recipes[0].category, Some(super::Category::LlmRuntime));
+        let container = recipes[0].method("container").unwrap();
+        let container_usage = recipes[0].effective_usage(container).unwrap();
+        assert!(container_usage.cli.is_empty());
+        assert_eq!(
+            container_usage.api.unwrap().base_url.as_deref(),
+            Some("http://127.0.0.1:11434")
+        );
     }
 
     #[test]
@@ -1509,6 +1862,7 @@ mod tests {
         };
         let asset = |name: &str| crate::github::ReleaseAsset {
             name: name.to_string(),
+            size: 0,
         };
         let release = crate::github::ReleaseInfo {
             tag_name: "v0.27.1".to_string(),
@@ -1521,7 +1875,7 @@ mod tests {
         };
 
         let (recipe, warnings) =
-            super::candidate_recipe("tangency-labs", &repo, Some(&release));
+            super::candidate_recipe("tangency-labs", &repo, Some(&release), None);
         assert!(!recipe.draft);
         assert_eq!(recipe.id, "tangency-labs-solidcraft");
         assert_eq!(recipe.platforms, vec!["linux-aarch64", "linux-x86_64"]);
@@ -1758,6 +2112,212 @@ mod tests {
         assert!(find(&directory, "legacy").is_err());
         assert_eq!(entries(&directory).unwrap().len(), 1);
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn usage_items_include_the_launch_command() {
+        let usage: super::Usage = serde_json::from_value(json!({
+            "launch": {
+                "command": "{install_dir}/bin/demo",
+                "source": "artifact",
+                "confidence": "high"
+            },
+            "inferred": true,
+            "source": "artifact",
+            "confidence": "high"
+        }))
+        .unwrap();
+        assert!(usage.inferred);
+        assert_eq!(usage.source.as_deref(), Some("artifact"));
+        assert_eq!(usage.confidence.as_deref(), Some("high"));
+        let items = usage.items();
+        assert!(items
+            .iter()
+            .any(|item| item.id == "launch" && item.kind == "launch"));
+        usage.validate("demo").unwrap();
+    }
+
+    #[test]
+    fn candidate_recipe_uses_inferred_category_and_launch() {
+        let repo = crate::github::RepoSummary {
+            name: "BeefTV".to_string(),
+            html_url: "https://github.com/glanderness/BeefTV".to_string(),
+            description: Some("AI Native Video workspace".to_string()),
+            homepage: Some("https://beeftv.app/".to_string()),
+            logo: None,
+        };
+        let release = crate::github::ReleaseInfo {
+            tag_name: "v2.1.6".to_string(),
+            assets: vec![crate::github::ReleaseAsset {
+                name: "BeefTV-v2.1.6-linux-amd64.zip".to_string(),
+                size: 10,
+            }],
+        };
+        let inference = crate::usage_infer::Inference {
+            category: Some(super::Category::DesktopApp),
+            launch: Some(super::LaunchUsage {
+                command: "{install_dir}/BeefTV-linux/BeefTV".to_string(),
+                source: Some("artifact".to_string()),
+                confidence: Some("high".to_string()),
+            }),
+            cli: vec![super::CliUsage {
+                id: Some("cli-help".to_string()),
+                label: "CLI help".to_string(),
+                command: "{install_dir}/BeefTV-linux/cli/beeftv --help".to_string(),
+            }],
+            warnings: Vec::new(),
+            source: "artifact".to_string(),
+            confidence: "high".to_string(),
+        };
+        let (recipe, warnings) = super::candidate_recipe(
+            "glanderness",
+            &repo,
+            Some(&release),
+            Some(&inference),
+        );
+        assert_eq!(recipe.category, Some(super::Category::DesktopApp));
+        let usage = recipe.usage.as_ref().unwrap();
+        assert!(usage.inferred);
+        assert_eq!(
+            usage.launch.as_ref().unwrap().command,
+            "{install_dir}/BeefTV-linux/BeefTV"
+        );
+        assert_eq!(usage.cli.len(), 1);
+        assert_eq!(usage.cli[0].label, "CLI help");
+        assert!(!warnings.iter().any(|warning| warning.contains("No start command")));
+    }
+
+    #[test]
+    fn update_imported_recipe_preserves_source() {
+        let directory = temp_catalog_dir("update-import");
+        let mut recipe = parse(base_recipe());
+        recipe.usage = Some(super::Usage {
+            website: Some("https://example.com".to_string()),
+            ..Default::default()
+        });
+        let source = RecipeSource {
+            url: "https://github.com/owner/repo".to_string(),
+            sha256: "abc".to_string(),
+            imported_at: "0".to_string(),
+        };
+        store_imported(&directory, &recipe, &source).unwrap();
+        recipe.category = Some(super::Category::DesktopApp);
+        recipe.usage.as_mut().unwrap().launch = Some(super::LaunchUsage {
+            command: "{install_dir}/demo".to_string(),
+            source: Some("artifact".to_string()),
+            confidence: Some("high".to_string()),
+        });
+        let updated = super::update_imported_recipe(&directory, &recipe).unwrap();
+        assert_eq!(
+            updated.source.as_ref().unwrap().url,
+            "https://github.com/owner/repo"
+        );
+        let stored = find(&directory, "demo").unwrap();
+        assert_eq!(stored.recipe.category, Some(super::Category::DesktopApp));
+        assert!(stored
+            .recipe
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.launch.as_ref())
+            .is_some());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn merges_method_usage_with_recipe_defaults() {
+        let mut value = base_recipe();
+        value["usage"] = json!({
+            "ui_url": "http://127.0.0.1:8080",
+            "api": { "base_url": "http://127.0.0.1:8080/api" },
+            "cli": [
+                { "id": "cli-run", "label": "Run", "command": "demo run" }
+            ]
+        });
+        value["methods"][0]["usage"] = json!({
+            "ui_url": "http://127.0.0.1:3000",
+            "cli": []
+        });
+        let recipe = parse(value);
+        let method = recipe.method("release").unwrap();
+        let usage = recipe.effective_usage(method).unwrap();
+        assert_eq!(usage.ui_url.as_deref(), Some("http://127.0.0.1:3000"));
+        assert_eq!(
+            usage.api.as_ref().unwrap().base_url.as_deref(),
+            Some("http://127.0.0.1:8080/api")
+        );
+        assert!(usage.cli.is_empty());
+    }
+
+    #[test]
+    fn usage_items_have_stable_ids_and_reject_duplicates() {
+        let usage: super::Usage = serde_json::from_value(json!({
+            "cli": [
+                { "label": "Pull a model", "command": "demo pull" },
+                { "id": "custom", "label": "Run", "command": "demo run" }
+            ]
+        }))
+        .unwrap();
+        let items = usage.items();
+        assert_eq!(items[0].id, "cli-pull-a-model");
+        assert_eq!(items[1].id, "custom");
+        usage.validate("demo").unwrap();
+
+        let duplicate: super::Usage = serde_json::from_value(json!({
+            "cli": [
+                { "id": "same", "label": "One", "command": "demo one" },
+                { "id": "same", "label": "Two", "command": "demo two" }
+            ]
+        }))
+        .unwrap();
+        let err = duplicate.validate("demo").unwrap_err();
+        assert!(err.contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn category_requirements_are_enforced() {
+        let cases = [
+            (
+                "llm-runtime",
+                json!({ "api": { "base_url": "http://127.0.0.1:11434" } }),
+                true,
+            ),
+            ("llm-runtime", json!({}), false),
+            (
+                "web-ui",
+                json!({ "ui_url": "http://127.0.0.1:3000" }),
+                true,
+            ),
+            ("web-ui", json!({}), false),
+            (
+                "image-generation",
+                json!({ "ui_url": "http://127.0.0.1:8188", "notes": "Models go in models/." }),
+                true,
+            ),
+            (
+                "image-generation",
+                json!({ "ui_url": "http://127.0.0.1:8188" }),
+                false,
+            ),
+            (
+                "cli-tool",
+                json!({ "cli": [{ "id": "cli-run", "label": "Run", "command": "demo run" }] }),
+                true,
+            ),
+            ("cli-tool", json!({}), false),
+            (
+                "desktop-app",
+                json!({ "website": "https://example.com" }),
+                true,
+            ),
+            ("desktop-app", json!({}), false),
+        ];
+        for (category, usage, valid) in cases {
+            let mut value = base_recipe();
+            value["category"] = json!(category);
+            value["usage"] = usage;
+            let result = parse(value).validate();
+            assert_eq!(result.is_ok(), valid, "category {category}: {result:?}");
+        }
     }
 
     #[test]

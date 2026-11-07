@@ -1,19 +1,54 @@
 import { useEffect, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
+  discoverUsage,
   getAppDetail,
   getJobLog,
+  getUsageReport,
   listJobs,
   onAppState,
   onJobFinished,
   onJobLog,
+  openLocalUrl,
   openUrl,
+  reinferUsage,
   removeRecipe,
+  runUsageCheck,
   uninstallApp,
   type AppDetail as AppDetailData,
+  type DetectedEntry,
   type JobRecord,
+  type UsageReport,
 } from '../api/apps'
 import { lifecycleLabel, primaryAction } from '../lifecycle'
+
+const USAGE_STATE_LABEL: Record<string, string> = {
+  verified: 'Verified',
+  stale: 'Stale',
+  failed: 'Failed',
+  unverified: 'Unverified',
+}
+
+function UsageBadge({ state }: { state?: string }) {
+  if (!state) return null
+  return (
+    <span className={`usage-badge usage-badge--${state}`}>
+      {USAGE_STATE_LABEL[state] ?? state}
+    </span>
+  )
+}
+
+function slug(value: string): string {
+  const slug = value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+  return slug || 'item'
+}
+
+function cliUsageId(item: { id: string | null; label: string }): string {
+  return item.id ?? `cli-${slug(item.label)}`
+}
 
 type Props = {
   appId: string
@@ -35,6 +70,10 @@ export function AppDetail({
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
+  const [usageReport, setUsageReport] = useState<UsageReport | null>(null)
+  const [detected, setDetected] = useState<DetectedEntry[]>([])
+  const [verifying, setVerifying] = useState(false)
+  const [reanalyzing, setReanalyzing] = useState(false)
 
   useEffect(() => {
     let disposed = false
@@ -44,7 +83,20 @@ export function AppDetail({
 
     getAppDetail(appId)
       .then((next) => {
-        if (!disposed) setDetail(next)
+        if (disposed) return
+        setDetail(next)
+        if (next.state !== 'not_installed') {
+          getUsageReport(appId)
+            .then((report) => {
+              if (!disposed) setUsageReport(report)
+            })
+            .catch(() => {})
+          discoverUsage(appId)
+            .then((entries) => {
+              if (!disposed) setDetected(entries)
+            })
+            .catch(() => {})
+        }
       })
       .catch((err) => {
         if (!disposed) setError(String(err))
@@ -101,6 +153,16 @@ export function AppDetail({
             }
           : current,
       )
+      if (event.state === 'not_installed') {
+        setUsageReport(null)
+        setDetected([])
+      } else if (event.state === 'running') {
+        discoverUsage(appId)
+          .then((entries) => {
+            if (!disposed) setDetected(entries)
+          })
+          .catch(() => {})
+      }
     })
       .then((fn) => {
         if (disposed) fn()
@@ -159,6 +221,41 @@ export function AppDetail({
     }
   }
 
+  async function handleOpenLocal(url: string) {
+    try {
+      await openLocalUrl(url)
+    } catch (err) {
+      setError(String(err))
+    }
+  }
+
+  async function handleVerifyUsage() {
+    setVerifying(true)
+    setError(null)
+    try {
+      setUsageReport(await runUsageCheck(appId))
+      setDetected(await discoverUsage(appId))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setVerifying(false)
+    }
+  }
+
+  async function handleReinferUsage() {
+    setReanalyzing(true)
+    setError(null)
+    try {
+      await reinferUsage(appId)
+      setDetail(await getAppDetail(appId))
+      setUsageReport(await getUsageReport(appId))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setReanalyzing(false)
+    }
+  }
+
   async function handleRemoveRecipe() {
     if (!detail) return
     const confirmed = window.confirm(
@@ -199,6 +296,12 @@ export function AppDetail({
   const visibleLog = log ?? liveLog
   const usage = detail?.usage ?? null
   const action = detail ? primaryAction(detail) : null
+  const usageStates = new Map(
+    usageReport?.items.map((item) => [item.id, item.state]) ?? [],
+  )
+  const installDir = detail?.installDir ?? ''
+  const expandCommand = (command: string) =>
+    installDir ? command.replace('{install_dir}', installDir) : command
 
   return (
     <div
@@ -327,10 +430,47 @@ export function AppDetail({
 
         {detail && detail.state !== 'not_installed' && usage && (
           <div className="usage-section">
-            <h3 className="detail-section-title">Use</h3>
+            <div className="usage-heading">
+              <h3 className="detail-section-title">
+                Use{' '}
+                {usage.inferred && (
+                  <span className="usage-badge usage-badge--inferred">
+                    Inferred
+                  </span>
+                )}
+              </h3>
+              <div className="usage-heading-actions">
+                {usageReport?.checkedAt && (
+                  <span className="usage-checked">
+                    Checked{' '}
+                    {new Date(Number(usageReport.checkedAt) * 1000).toLocaleString()}
+                  </span>
+                )}
+                {detail.sourceUrl && (
+                  <button
+                    type="button"
+                    className="popover-button usage-action"
+                    disabled={reanalyzing}
+                    onClick={() => void handleReinferUsage()}
+                  >
+                    {reanalyzing ? 'Analyzing…' : 'Re-analyze'}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  disabled={detail.state !== 'running' || verifying}
+                  onClick={() => void handleVerifyUsage()}
+                >
+                  {verifying ? 'Checking…' : 'Verify'}
+                </button>
+              </div>
+            </div>
             {usage.website && (
               <div className="usage-row">
-                <span className="usage-label">Website</span>
+                <span className="usage-label">
+                  Website <UsageBadge state={usageStates.get('website')} />
+                </span>
                 <code className="usage-value">{usage.website}</code>
                 <button
                   type="button"
@@ -343,7 +483,9 @@ export function AppDetail({
             )}
             {usage.ui_url && (
               <div className="usage-row">
-                <span className="usage-label">Web UI</span>
+                <span className="usage-label">
+                  Web UI <UsageBadge state={usageStates.get('ui')} />
+                </span>
                 <code className="usage-value">{usage.ui_url}</code>
                 <button
                   type="button"
@@ -357,7 +499,9 @@ export function AppDetail({
             )}
             {usage.api?.base_url && (
               <div className="usage-row">
-                <span className="usage-label">API base</span>
+                <span className="usage-label">
+                  API base <UsageBadge state={usageStates.get('api-base')} />
+                </span>
                 <code className="usage-value">{usage.api.base_url}</code>
                 <button
                   type="button"
@@ -370,7 +514,10 @@ export function AppDetail({
             )}
             {usage.api?.openai_base_url && (
               <div className="usage-row">
-                <span className="usage-label">OpenAI-compatible</span>
+                <span className="usage-label">
+                  OpenAI-compatible{' '}
+                  <UsageBadge state={usageStates.get('openai-base')} />
+                </span>
                 <code className="usage-value">{usage.api.openai_base_url}</code>
                 <button
                   type="button"
@@ -383,7 +530,14 @@ export function AppDetail({
             )}
             {(usage.api?.docs_url || usage.docs_url) && (
               <div className="usage-row">
-                <span className="usage-label">Documentation</span>
+                <span className="usage-label">
+                  Documentation{' '}
+                  <UsageBadge
+                    state={usageStates.get(
+                      usage.api?.docs_url ? 'api-docs' : 'docs',
+                    )}
+                  />
+                </span>
                 <code className="usage-value">
                   {usage.api?.docs_url ?? usage.docs_url}
                 </code>
@@ -398,20 +552,81 @@ export function AppDetail({
                 </button>
               </div>
             )}
-            {usage.cli.map((item) => (
-              <div className="usage-row" key={item.command}>
-                <span className="usage-label">{item.label}</span>
-                <code className="usage-value">{item.command}</code>
+            {usage.launch && (
+              <div className="usage-row">
+                <span className="usage-label">
+                  Launch <UsageBadge state={usageStates.get('launch')} />
+                </span>
+                <code className="usage-value">
+                  {expandCommand(usage.launch.command)}
+                </code>
                 <button
                   type="button"
                   className="popover-button usage-action"
-                  onClick={() => void copyText(item.command, item.command)}
+                  onClick={() =>
+                    void copyText(expandCommand(usage.launch!.command), 'launch')
+                  }
+                >
+                  {copiedKey === 'launch' ? 'Copied' : 'Copy'}
+                </button>
+              </div>
+            )}
+            {usage.cli.map((item) => (
+              <div className="usage-row" key={item.command}>
+                <span className="usage-label">
+                  {item.label}{' '}
+                  <UsageBadge state={usageStates.get(cliUsageId(item))} />
+                </span>
+                <code className="usage-value">
+                  {expandCommand(item.command)}
+                </code>
+                <button
+                  type="button"
+                  className="popover-button usage-action"
+                  onClick={() =>
+                    void copyText(expandCommand(item.command), item.command)
+                  }
                 >
                   {copiedKey === item.command ? 'Copied' : 'Copy'}
                 </button>
               </div>
             ))}
             {usage.notes && <p className="usage-note">{usage.notes}</p>}
+          </div>
+        )}
+
+        {detail && detail.state === 'running' && detected.length > 0 && (
+          <div className="usage-section">
+            <h3 className="detail-section-title">Detected</h3>
+            {detected.map((entry) => (
+              <div className="usage-row" key={entry.url}>
+                <span className="usage-label">
+                  {entry.kind}{' '}
+                  <span
+                    className={`usage-confidence usage-confidence--${entry.confidence}`}
+                  >
+                    {entry.confidence}
+                  </span>
+                </span>
+                <code className="usage-value">{entry.url}</code>
+                <span className="usage-detected-actions">
+                  <button
+                    type="button"
+                    className="popover-button usage-action"
+                    onClick={() => void handleOpenLocal(entry.url)}
+                  >
+                    Open
+                  </button>
+                  <button
+                    type="button"
+                    className="popover-button usage-action"
+                    onClick={() => void copyText(entry.url, entry.url)}
+                  >
+                    {copiedKey === entry.url ? 'Copied' : 'Copy'}
+                  </button>
+                </span>
+              </div>
+            ))}
           </div>
         )}
 

@@ -34,8 +34,15 @@ export type UsageApi = {
 }
 
 export type UsageCli = {
+  id: string | null
   label: string
   command: string
+}
+
+export type UsageLaunch = {
+  command: string
+  source: string | null
+  confidence: string | null
 }
 
 export type Usage = {
@@ -44,7 +51,39 @@ export type Usage = {
   api: UsageApi | null
   docs_url: string | null
   cli: UsageCli[]
+  launch: UsageLaunch | null
+  inferred: boolean
+  source: string | null
+  confidence: string | null
   notes: string | null
+}
+
+export type UsageItemState = {
+  id: string
+  kind: string
+  label: string
+  value: string
+  state: 'verified' | 'stale' | 'failed' | 'unverified'
+  status: string | null
+  message: string | null
+  checkedAt: string | null
+  details: Record<string, unknown> | null
+}
+
+export type UsageReport = {
+  appId: string
+  methodId: string
+  version: string
+  checkedAt: string | null
+  items: UsageItemState[]
+}
+
+export type DetectedEntry = {
+  kind: string
+  url: string
+  title: string | null
+  confidence: string
+  evidence: string
 }
 
 export type AppDetail = Omit<AppSummary, 'iconUrl'> & {
@@ -235,6 +274,30 @@ export function openUrl(appId: string, url: string): Promise<void> {
   return invoke('open_url', {
     appId,
     url,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function openLocalUrl(url: string): Promise<void> {
+  return invoke('open_local_url', { url })
+}
+
+export function getUsageReport(appId: string): Promise<UsageReport> {
+  return invoke('get_usage_report', { appId })
+}
+
+export function runUsageCheck(appId: string): Promise<UsageReport> {
+  return invoke('usage_check', { appId })
+}
+
+export function discoverUsage(appId: string): Promise<DetectedEntry[]> {
+  return invoke('discover_usage', { appId })
+}
+
+export function reinferUsage(appId: string): Promise<void> {
+  return invoke('reinfer_usage', {
+    appId,
     origin: 'ui',
     confirmed: true,
   })
