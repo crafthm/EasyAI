@@ -7,7 +7,7 @@ The dev server is already running: [http://localhost:1420](http://localhost:1420
 To start it manually:
 
 ```bash
-cd /home/lizh/workspace/startAI/src/ui
+cd ./src/ui
 pnpm install        # first time, or when dependencies change
 pnpm dev            # http://localhost:1420
 ```
@@ -43,7 +43,6 @@ sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
 3) Run it (from the repository root):
 
 ```bash
-cd /home/lizh/workspace/startAI
 pnpm dlx @tauri-apps/cli@^2 dev
 ```
 
