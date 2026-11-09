@@ -65,7 +65,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
   const currentAsset = currentMethod?.source?.asset[preview?.platform ?? ''] ?? null
   const currentService = currentMethod?.service ?? null
   const canImport = Boolean(
-    preview && preview.supported && !preview.conflict && !busy,
+    preview && !preview.unusable && !preview.conflict && !busy,
   )
 
   return (
@@ -140,8 +140,14 @@ export function ImportDialog({ onClose, onImported }: Props) {
               <dd className="preview-mono">{preview.sourceUrl}</dd>
               <dt>Checksum</dt>
               <dd className="preview-mono">{preview.sha256.slice(0, 16)}…</dd>
+              <dt>This machine</dt>
+              <dd className="preview-mono">{preview.platform}</dd>
               <dt>Platforms</dt>
-              <dd>{preview.recipe.platforms.join(', ') || '—'}</dd>
+              <dd>
+                {preview.detectedPlatforms.length
+                  ? preview.detectedPlatforms.join(', ')
+                  : '—'}
+              </dd>
               <dt>Type</dt>
               <dd>
                 {draft
@@ -162,6 +168,9 @@ export function ImportDialog({ onClose, onImported }: Props) {
               )}
             </dl>
 
+            {preview.unusable && preview.hint && (
+              <p className="preview-warning preview-blocked">{preview.hint}</p>
+            )}
             {preview.conflict && (
               <p className="preview-warning preview-blocked">
                 An application with this id already exists.

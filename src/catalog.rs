@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -555,10 +555,97 @@ pub struct RecipePreview {
     pub recipe: Recipe,
     pub source_url: String,
     pub sha256: String,
+    /// The platform of the machine running the import, e.g. `linux-x86_64`.
     pub platform: String,
+    /// Whether this machine has an install method for the application.
     pub supported: bool,
+    /// Every platform the repository publishes for, whether or not this
+    /// machine can install it.
+    pub detected_platforms: Vec<String>,
+    /// Set when the repository does not look like installable software on this
+    /// machine; the UI blocks the import and shows `hint`.
+    pub unusable: bool,
+    pub hint: Option<String>,
     pub conflict: bool,
     pub warnings: Vec<String>,
+}
+
+/// Describes why a candidate recipe cannot be used on `platform`, if it cannot.
+struct Availability {
+    supported: bool,
+    detected_platforms: Vec<String>,
+    unusable: bool,
+    hint: Option<String>,
+}
+
+impl Availability {
+    fn describe(
+        recipe: &Recipe,
+        platform: &str,
+        analysis: &DraftAnalysis,
+    ) -> Result<Self, String> {
+        let (os, arch) = split_platform(platform)?;
+        let supported = !recipe.methods.is_empty() && recipe.supports_platform(os, arch);
+        let detected = if analysis.detected_platforms.is_empty() {
+            recipe.platforms.clone()
+        } else {
+            analysis.detected_platforms.clone()
+        };
+        if supported {
+            return Ok(Self {
+                supported,
+                detected_platforms: detected,
+                unusable: false,
+                hint: None,
+            });
+        }
+        if recipe.methods.is_empty() {
+            let hint = if !detected.is_empty() {
+                format!(
+                    "This repository publishes installers for {} but none of them can be installed automatically. It is probably not a runnable application.",
+                    summarize_platforms(&detected)
+                )
+            } else if analysis.installer_only {
+                "The latest release only ships native installers, which this version cannot install automatically."
+                    .to_string()
+            } else {
+                "No installable artifact was found. This repository is probably a library, a plugin, or not a runnable application."
+                    .to_string()
+            };
+            return Ok(Self {
+                supported,
+                detected_platforms: detected,
+                unusable: true,
+                hint: Some(hint),
+            });
+        }
+        let hint = if detected.is_empty() {
+            format!("No install method targets {platform}.")
+        } else {
+            format!(
+                "This application only supports {}, not {platform}.",
+                summarize_platforms(&detected)
+            )
+        };
+        Ok(Self {
+            supported,
+            detected_platforms: detected,
+            unusable: true,
+            hint: Some(hint),
+        })
+    }
+}
+
+/// Groups platform ids by OS: `linux-x86_64, linux-aarch64, macos-aarch64`
+/// becomes `linux, macos`.
+fn summarize_platforms(platforms: &[String]) -> String {
+    let mut systems: Vec<&str> = platforms
+        .iter()
+        .filter_map(|platform| platform.split_once('-').map(|(os, _)| os))
+        .collect();
+    systems.sort_unstable();
+    systems.dedup();
+    systems.join(", ")
 }
 
 fn category_satisfied(category: Category, usage: &Usage) -> bool {
@@ -1080,11 +1167,25 @@ pub fn entries(app_data: &Path) -> Result<Vec<CatalogEntry>, String> {
                 source: Some(stored.source),
             });
         }
-        imported.sort_by(|left, right| left.recipe.id.cmp(&right.recipe.id));
+        imported.sort_by(|left, right| {
+            imported_at_secs(left)
+                .cmp(&imported_at_secs(right))
+                .then_with(|| left.recipe.id.cmp(&right.recipe.id))
+        });
         entries.extend(imported);
     }
 
     Ok(entries)
+}
+
+/// Import order key: the epoch seconds recorded when the recipe was imported.
+/// Entries without a source (bundled recipes) are never sorted against imports.
+fn imported_at_secs(entry: &CatalogEntry) -> u64 {
+    entry
+        .source
+        .as_ref()
+        .and_then(|source| source.imported_at.trim().parse::<u64>().ok())
+        .unwrap_or(0)
 }
 
 pub fn find(app_data: &Path, app_id: &str) -> Result<CatalogEntry, String> {
@@ -1101,8 +1202,7 @@ pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, Str
     };
     let sha256 = sha256_hex(content.as_bytes());
     let recipe = parse_recipe(&content)?;
-    let (os, arch) = split_platform(&platform)?;
-    let supported = recipe.supports_platform(os, arch);
+    let availability = Availability::describe(&recipe, &platform, &DraftAnalysis::default())?;
     let conflict = entries(app_data)?
         .iter()
         .any(|entry| entry.recipe.id == recipe.id);
@@ -1110,11 +1210,6 @@ pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, Str
     let mut warnings = vec![
         "Release archives are not checksum-verified by this version.".to_string(),
     ];
-    if !supported {
-        warnings.push(format!(
-            "This recipe does not support the current machine ({platform})."
-        ));
-    }
     if conflict {
         warnings.push(format!(
             "An application with id '{}' already exists.",
@@ -1127,7 +1222,10 @@ pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, Str
         source_url,
         sha256,
         platform,
-        supported,
+        supported: availability.supported,
+        detected_platforms: availability.detected_platforms,
+        unusable: availability.unusable,
+        hint: availability.hint,
         conflict,
         warnings,
     })
@@ -1153,7 +1251,7 @@ fn preview_draft(
             platform,
         )
     });
-    let (recipe, candidate_warnings) =
+    let (recipe, candidate_warnings, analysis) =
         candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
     let mut warnings = vec![
         "This repository publishes no EasyAI recipe. A candidate recipe was generated from its latest release."
@@ -1167,17 +1265,7 @@ fn preview_draft(
     let conflict = entries(app_data)?
         .iter()
         .any(|entry| entry.recipe.id == recipe.id);
-    let supported = if recipe.draft {
-        true
-    } else {
-        let (os, arch) = split_platform(platform)?;
-        recipe.supports_platform(os, arch)
-    };
-    if !supported {
-        warnings.push(format!(
-            "The latest release has no archive for this machine ({platform})."
-        ));
-    }
+    let availability = Availability::describe(&recipe, platform, &analysis)?;
     if conflict {
         warnings.push(format!(
             "An application with id '{}' already exists.",
@@ -1190,7 +1278,10 @@ fn preview_draft(
         source_url: repo.html_url,
         sha256,
         platform: platform.to_string(),
-        supported,
+        supported: availability.supported,
+        detected_platforms: availability.detected_platforms,
+        unusable: availability.unusable,
+        hint: availability.hint,
         conflict,
         warnings,
     })
@@ -1214,7 +1305,7 @@ fn import_draft(
             &platform,
         )
     });
-    let (recipe, _) =
+    let (recipe, _, analysis) =
         candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     if sha256 != expected_sha256 {
@@ -1230,6 +1321,12 @@ fn import_draft(
             "An application with id '{}' already exists.",
             recipe.id
         ));
+    }
+    let availability = Availability::describe(&recipe, &platform, &analysis)?;
+    if availability.unusable {
+        return Err(availability
+            .hint
+            .unwrap_or_else(|| format!("This repository cannot be installed on {platform}.")));
     }
 
     let source = RecipeSource {
@@ -1390,15 +1487,23 @@ fn candidate_recipe(
     repo: &crate::github::RepoSummary,
     release: Option<&crate::github::ReleaseInfo>,
     inference: Option<&crate::usage_infer::Inference>,
-) -> (Recipe, Vec<String>) {
+) -> (Recipe, Vec<String>, DraftAnalysis) {
     let full_repo = format!("{owner}/{}", repo.name);
     let mut assets: BTreeMap<String, (u8, String)> = BTreeMap::new();
+    let mut detected: BTreeSet<String> = BTreeSet::new();
+    let mut installer_only = false;
     if let Some(release) = release {
         for asset in &release.assets {
-            let Some(rank) = archive_rank(&asset.name) else {
+            let Some((rank, packaging)) = asset_rank(&asset.name) else {
                 continue;
             };
-            for platform in platforms_for_asset(&asset.name) {
+            let platforms = platforms_for_asset(&asset.name);
+            detected.extend(platforms.iter().cloned());
+            if packaging != Packaging::Archive {
+                installer_only = true;
+                continue;
+            }
+            for platform in platforms {
                 if assets
                     .get(&platform)
                     .is_some_and(|(best, _)| *best <= rank)
@@ -1423,6 +1528,12 @@ fn candidate_recipe(
             "No usable release archive was found. The app will be added as a draft without an install method."
                 .to_string(),
         );
+        if installer_only {
+            warnings.push(
+                "The latest release only ships native installers, which this version cannot install automatically."
+                    .to_string(),
+            );
+        }
     } else {
         warnings.push(
             "Install method inferred from the latest GitHub Release. Review it before installing."
@@ -1474,7 +1585,19 @@ fn candidate_recipe(
         legacy_service: None,
         legacy_uninstall: None,
     };
-    (recipe, warnings)
+    let analysis = DraftAnalysis {
+        detected_platforms: detected.into_iter().collect(),
+        installer_only,
+    };
+    (recipe, warnings, analysis)
+}
+
+/// What the release assets reveal beyond the generated recipe: every platform
+/// the repository publishes for, and whether it only ships native installers.
+#[derive(Debug, Clone, Default)]
+struct DraftAnalysis {
+    detected_platforms: Vec<String>,
+    installer_only: bool,
 }
 
 fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
@@ -1523,8 +1646,19 @@ fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
     }
 }
 
-/// Downloadable archive formats the release executor can extract.
-fn archive_rank(name: &str) -> Option<u8> {
+/// How a release asset is packaged, which decides both its platform and
+/// whether the release executor can extract it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Packaging {
+    /// An archive the executor can unpack into an install directory.
+    Archive,
+    /// A native installer or package that needs the OS package handler.
+    Installer,
+}
+
+/// Downloadable release formats, best first. Archives rank before native
+/// installers because they can be installed without elevation.
+fn asset_rank(name: &str) -> Option<(u8, Packaging)> {
     let lower = name.to_ascii_lowercase();
     if lower.ends_with(".sha256")
         || lower.contains("sha256sum")
@@ -1537,10 +1671,11 @@ fn archive_rank(name: &str) -> Option<u8> {
         || lower.contains("_source")
         || lower.contains("symbols")
         || lower.contains("debug")
+        || lower.contains("checksum")
     {
         return None;
     }
-    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+    let archive = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
         Some(0)
     } else if lower.ends_with(".tar.zst") {
         Some(1)
@@ -1552,31 +1687,91 @@ fn archive_rank(name: &str) -> Option<u8> {
         Some(4)
     } else {
         None
+    };
+    if let Some(rank) = archive {
+        return Some((rank, Packaging::Archive));
     }
+    const INSTALLERS: [&str; 8] = [
+        ".deb", ".rpm", ".appimage", ".snap", ".exe", ".msi", ".dmg", ".pkg",
+    ];
+    INSTALLERS
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+        .then_some((5, Packaging::Installer))
+}
+
+/// Kept for callers that only need to know whether an asset is downloadable.
+fn archive_rank(name: &str) -> Option<u8> {
+    asset_rank(name).map(|(rank, _)| rank)
+}
+
+/// The operating system an asset targets, when it can be determined from the
+/// file name. Installer formats are decided by their extension first, so a
+/// `.dmg` or a `.exe` needs no `macos`/`windows` token in its name.
+fn asset_os(lower: &str) -> Option<&'static str> {
+    const FORMATS: [(&str, &str); 11] = [
+        (".deb", "linux"),
+        (".rpm", "linux"),
+        (".appimage", "linux"),
+        (".snap", "linux"),
+        (".flatpak", "linux"),
+        (".exe", "windows"),
+        (".msi", "windows"),
+        (".msix", "windows"),
+        (".dmg", "macos"),
+        (".pkg", "macos"),
+        (".app", "macos"),
+    ];
+    if let Some((_, os)) = FORMATS
+        .iter()
+        .find(|(suffix, _)| lower.ends_with(suffix))
+    {
+        return Some(os);
+    }
+    const TOKENS: [(&str, &str); 11] = [
+        ("linux", "linux"),
+        ("gnu", "linux"),
+        ("musl", "linux"),
+        ("windows", "windows"),
+        ("win32", "windows"),
+        ("win64", "windows"),
+        ("mingw", "windows"),
+        ("msvc", "windows"),
+        ("macos", "macos"),
+        ("darwin", "macos"),
+        ("osx", "macos"),
+    ];
+    TOKENS
+        .iter()
+        .find(|(token, _)| lower.contains(token))
+        .map(|(_, os)| *os)
+}
+
+/// Architectures an asset targets. A macOS `universal` build covers both.
+fn asset_archs(lower: &str) -> Vec<&'static str> {
+    if lower.contains("universal") {
+        return vec!["x86_64", "aarch64"];
+    }
+    if lower.contains("aarch64") || lower.contains("arm64") {
+        return vec!["aarch64"];
+    }
+    // armv7 and 32-bit x86 are outside the supported platforms.
+    if lower.contains("armv7") || lower.contains("armhf") {
+        return Vec::new();
+    }
+    // An asset without an architecture token is treated as the common case.
+    vec!["x86_64"]
 }
 
 fn platforms_for_asset(name: &str) -> Vec<String> {
     let lower = name.to_ascii_lowercase();
-    let os = if lower.contains("linux") {
-        "linux"
-    } else if lower.contains("macos") || lower.contains("darwin") || lower.contains("osx") {
-        "macos"
-    } else if lower.contains("windows") || lower.contains("win64") {
-        "windows"
-    } else {
+    let Some(os) = asset_os(&lower) else {
         return Vec::new();
     };
-    if os == "macos" && lower.contains("universal") {
-        return vec!["macos-x86_64".to_string(), "macos-aarch64".to_string()];
-    }
-    let arch = if lower.contains("aarch64") || lower.contains("arm64") {
-        "aarch64"
-    } else if lower.contains("x86_64") || lower.contains("amd64") || lower.contains("x64") {
-        "x86_64"
-    } else {
-        return Vec::new();
-    };
-    vec![format!("{os}-{arch}")]
+    asset_archs(&lower)
+        .into_iter()
+        .map(|arch| format!("{os}-{arch}"))
+        .collect()
 }
 
 /// Replaces the concrete version in an asset name with the `{version}`
@@ -1849,6 +2044,114 @@ mod tests {
     }
 
     #[test]
+    fn installer_formats_decide_the_platform() {
+        // A `.dmg` or `.exe` needs no platform token in its name.
+        assert_eq!(
+            super::platforms_for_asset("SolidCraft-0.27.1.dmg"),
+            vec!["macos-x86_64"]
+        );
+        assert_eq!(
+            super::platforms_for_asset("SolidCraft-Setup.exe"),
+            vec!["windows-x86_64"]
+        );
+        assert_eq!(
+            super::platforms_for_asset("solidcraft_0.27.1_amd64.deb"),
+            vec!["linux-x86_64"]
+        );
+        assert_eq!(
+            super::platforms_for_asset("SolidCraft-0.27.1.AppImage"),
+            vec!["linux-x86_64"]
+        );
+        assert_eq!(
+            super::platforms_for_asset("SolidCraft-0.27.1-aarch64.dmg"),
+            vec!["macos-aarch64"]
+        );
+        assert_eq!(
+            super::platforms_for_asset("SolidCraft-0.27.1-macos-universal.dmg"),
+            vec!["macos-x86_64", "macos-aarch64"]
+        );
+        // Sources, checksums, and unrelated files carry no platform.
+        assert!(super::platforms_for_asset("SHA256SUMS.txt").is_empty());
+        assert!(super::platforms_for_asset("app-linux-amd64.sha256").is_empty());
+        // armv7 is outside the supported platforms.
+        assert!(super::platforms_for_asset("app-linux-armv7.tar.gz").is_empty());
+    }
+
+    #[test]
+    fn installer_only_release_is_reported_as_unusable() {
+        let repo = crate::github::RepoSummary {
+            name: "solidcraft".to_string(),
+            html_url: "https://github.com/tangency-labs/solidcraft".to_string(),
+            description: Some("CAD".to_string()),
+            homepage: None,
+            logo: None,
+        };
+        let release = crate::github::ReleaseInfo {
+            tag_name: "v1.0.0".to_string(),
+            assets: vec![crate::github::ReleaseAsset {
+                name: "SolidCraft-1.0.0.dmg".to_string(),
+                size: 0,
+            }],
+        };
+        let (recipe, _, analysis) =
+            super::candidate_recipe("tangency-labs", &repo, Some(&release), None);
+        assert!(recipe.draft);
+        assert!(analysis.installer_only);
+        assert_eq!(analysis.detected_platforms, vec!["macos-x86_64"]);
+
+        let availability =
+            super::Availability::describe(&recipe, "linux-x86_64", &analysis).unwrap();
+        assert!(!availability.supported);
+        assert!(availability.unusable);
+        assert!(
+            availability
+                .hint
+                .unwrap()
+                .contains("macos"),
+            "the hint should name the platforms the release publishes for"
+        );
+    }
+
+    #[test]
+    fn repository_without_assets_is_unusable() {
+        let recipe = parse(json!({
+            "id": "owner-repo",
+            "name": "repo",
+            "draft": true
+        }));
+        let availability = super::Availability::describe(
+            &recipe,
+            "linux-x86_64",
+            &super::DraftAnalysis::default(),
+        )
+        .unwrap();
+        assert!(availability.unusable);
+        assert!(availability.detected_platforms.is_empty());
+    }
+
+    #[test]
+    fn supported_recipe_is_usable() {
+        let recipe = parse(base_recipe());
+        let availability =
+            super::Availability::describe(&recipe, "linux-x86_64", &super::DraftAnalysis::default())
+                .unwrap();
+        assert!(availability.supported);
+        assert!(!availability.unusable);
+        assert!(availability.hint.is_none());
+    }
+
+    #[test]
+    fn other_platform_recipe_reports_a_hint() {
+        let recipe = parse(base_recipe());
+        let availability =
+            super::Availability::describe(&recipe, "macos-aarch64", &super::DraftAnalysis::default())
+                .unwrap();
+        assert!(!availability.supported);
+        assert!(availability.unusable);
+        assert!(availability.hint.unwrap().contains("linux"));
+    }
+
+    #[test]
     fn candidate_recipe_infers_release_methods_from_assets() {
         let repo = crate::github::RepoSummary {
             name: "solidcraft".to_string(),
@@ -1874,7 +2177,7 @@ mod tests {
             ],
         };
 
-        let (recipe, warnings) =
+        let (recipe, warnings, analysis) =
             super::candidate_recipe("tangency-labs", &repo, Some(&release), None);
         assert!(!recipe.draft);
         assert_eq!(recipe.id, "tangency-labs-solidcraft");
@@ -1889,6 +2192,13 @@ mod tests {
             method.source.as_ref().unwrap().asset["linux-x86_64"],
             "solidcraft-{version}-linux-x86_64.tar.gz"
         );
+        // The macOS asset is a native installer: it counts as platform evidence
+        // but does not produce an install method this version can execute.
+        assert_eq!(
+            analysis.detected_platforms,
+            vec!["linux-aarch64", "linux-x86_64", "macos-aarch64", "macos-x86_64"]
+        );
+        assert!(analysis.installer_only);
         assert!(recipe.validate().is_ok());
         assert!(warnings.iter().any(|warning| warning.contains("No start command")));
     }
@@ -2169,7 +2479,7 @@ mod tests {
             source: "artifact".to_string(),
             confidence: "high".to_string(),
         };
-        let (recipe, warnings) = super::candidate_recipe(
+        let (recipe, warnings, _) = super::candidate_recipe(
             "glanderness",
             &repo,
             Some(&release),
@@ -2220,6 +2530,34 @@ mod tests {
             .as_ref()
             .and_then(|usage| usage.launch.as_ref())
             .is_some());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn imported_entries_follow_creation_order() {
+        let directory = temp_catalog_dir("creation-order");
+        let source = |imported_at: &str| RecipeSource {
+            url: "https://example.com/easyai.json".to_string(),
+            sha256: "abc".to_string(),
+            imported_at: imported_at.to_string(),
+        };
+        // Ids are deliberately in reverse alphabetical order so that an
+        // id-based sort would produce the opposite sequence.
+        let mut newer = parse(base_recipe());
+        newer.id = "aaa-newer".to_string();
+        newer.name = "Newer".to_string();
+        let mut older = parse(base_recipe());
+        older.id = "zzz-older".to_string();
+        older.name = "Older".to_string();
+        store_imported(&directory, &newer, &source("200")).unwrap();
+        store_imported(&directory, &older, &source("100")).unwrap();
+
+        let ids: Vec<String> = entries(&directory)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.recipe.id)
+            .collect();
+        assert_eq!(ids, vec!["ollama", "zzz-older", "aaa-newer"]);
         std::fs::remove_dir_all(&directory).unwrap();
     }
 

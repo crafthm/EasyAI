@@ -1,18 +1,40 @@
-import { useCallback, useState } from 'react'
+import { useCallback, useMemo, useState } from 'react'
 import type { AppSummary } from './api/apps'
 import { AppDetail } from './components/AppDetail'
 import { AppGrid } from './components/AppGrid'
 import { InstallPlanDialog } from './components/InstallPlanDialog'
-import { Toolbar } from './components/Toolbar'
+import { Toolbar, type InstallFilter } from './components/Toolbar'
 import { useApps } from './hooks/useApps'
+
+function matchesFilter(app: AppSummary, filter: InstallFilter): boolean {
+  if (filter === 'installed') return app.state !== 'not_installed'
+  if (filter === 'not_installed') return app.state === 'not_installed'
+  return true
+}
+
+function matchesQuery(app: AppSummary, query: string): boolean {
+  const keyword = query.trim().toLowerCase()
+  if (!keyword) return true
+  return (
+    app.name.toLowerCase().includes(keyword) ||
+    app.description.toLowerCase().includes(keyword)
+  )
+}
 
 function App() {
   const { apps, loading, error, install, start, stop, refresh, dismissError } =
     useApps()
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [planApp, setPlanApp] = useState<AppSummary | null>(null)
+  const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<InstallFilter>('all')
   const closeDetail = useCallback(() => setSelectedId(null), [])
   const closePlan = useCallback(() => setPlanApp(null), [])
+
+  const visibleApps = useMemo(
+    () => apps.filter((app) => matchesFilter(app, filter) && matchesQuery(app, query)),
+    [apps, filter, query],
+  )
 
   function handleAction(app: AppSummary) {
     if (app.draft) return
@@ -32,7 +54,13 @@ function App() {
 
   return (
     <div className="app">
-      <Toolbar onImported={() => void refresh()} />
+      <Toolbar
+        onImported={() => void refresh()}
+        query={query}
+        onQueryChange={setQuery}
+        filter={filter}
+        onFilterChange={setFilter}
+      />
       {error && (
         <div className="banner-error" role="alert">
           <span>{error}</span>
@@ -53,7 +81,7 @@ function App() {
           <p className="grid-message">Loading applications…</p>
         </main>
       ) : (
-        <AppGrid items={apps} onOpen={setSelectedId} />
+        <AppGrid items={visibleApps} onOpen={setSelectedId} />
       )}
       {selectedId && (
         <AppDetail

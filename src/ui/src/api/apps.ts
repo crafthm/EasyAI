@@ -155,6 +155,9 @@ export type RecipePreview = {
   sha256: string
   platform: string
   supported: boolean
+  detectedPlatforms: string[]
+  unusable: boolean
+  hint: string | null
   conflict: boolean
   warnings: string[]
 }

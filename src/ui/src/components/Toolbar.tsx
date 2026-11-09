@@ -1,20 +1,103 @@
-import { useState } from 'react'
-import { GearIcon, PlusIcon } from './icons'
+import { useEffect, useRef, useState } from 'react'
+import { CloseIcon, GearIcon, PlusIcon, SearchIcon } from './icons'
 import { ImportDialog } from './ImportDialog'
 import { SettingsPopover } from './SettingsPopover'
 
+export type InstallFilter = 'all' | 'installed' | 'not_installed'
+
 type Props = {
   onImported: () => void
+  query: string
+  onQueryChange: (value: string) => void
+  filter: InstallFilter
+  onFilterChange: (value: InstallFilter) => void
 }
 
-export function Toolbar({ onImported }: Props) {
+const FILTERS: { value: InstallFilter; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'installed', label: 'Installed' },
+  { value: 'not_installed', label: 'Not installed' },
+]
+
+export function Toolbar({
+  onImported,
+  query,
+  onQueryChange,
+  filter,
+  onFilterChange,
+}: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const searchRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (searchOpen) searchRef.current?.focus()
+  }, [searchOpen])
+
+  function closeSearch() {
+    setSearchOpen(false)
+    onQueryChange('')
+  }
 
   return (
     <>
       <header className="toolbar">
         <h1 className="brand">EasyAI</h1>
+        <div className="toolbar-search">
+          {searchOpen ? (
+            <div className="search-field">
+              <SearchIcon />
+              <input
+                ref={searchRef}
+                type="search"
+                className="toolbar-search-input"
+                placeholder="Search applications"
+                aria-label="Search applications"
+                value={query}
+                onChange={(event) => onQueryChange(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') closeSearch()
+                }}
+              />
+              <button
+                type="button"
+                className="search-clear"
+                title="Close search"
+                aria-label="Close search"
+                onClick={closeSearch}
+              >
+                <CloseIcon />
+              </button>
+            </div>
+          ) : (
+            <button
+              type="button"
+              className="icon-button"
+              title="Search applications"
+              aria-label="Search applications"
+              onClick={() => setSearchOpen(true)}
+            >
+              <SearchIcon />
+            </button>
+          )}
+        </div>
+        <div className="toolbar-filters">
+          <select
+            className="filter-select"
+            aria-label="Filter applications"
+            value={filter}
+            onChange={(event) =>
+              onFilterChange(event.target.value as InstallFilter)
+            }
+          >
+            {FILTERS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="toolbar-actions">
           <button
             type="button"

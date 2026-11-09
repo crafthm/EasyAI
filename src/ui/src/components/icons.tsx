@@ -26,3 +26,20 @@ export function GearIcon() {
     </svg>
   )
 }
+
+export function SearchIcon() {
+  return (
+    <svg {...iconProps}>
+      <circle cx="11" cy="11" r="7" />
+      <path d="M20 20l-3.2-3.2" />
+    </svg>
+  )
+}
+
+export function CloseIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M6 6l12 12M18 6L6 18" />
+    </svg>
+  )
+}

@@ -134,12 +134,14 @@ export function AppTile({ app, onOpen }: Props) {
             />
           )}
           {!logo && <span className="app-tile-shade" aria-hidden="true" />}
-          <span
-            className={`app-tile-status ${
-              running ? 'app-tile-status--up' : 'app-tile-status--down'
-            }`}
-            aria-hidden="true"
-          />
+          {app.state !== 'not_installed' && (
+            <span
+              className={`app-tile-status ${
+                running ? 'app-tile-status--up' : 'app-tile-status--down'
+              }`}
+              aria-hidden="true"
+            />
+          )}
         </span>
         <span className="app-tile-name" title={app.name}>
           {app.name}

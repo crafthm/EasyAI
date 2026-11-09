@@ -63,14 +63,15 @@ body {
   height: 56px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-end;
+  gap: 8px;
   padding: 0 16px;
   border: none;
   background: transparent;
 }
 
 .brand {
-  margin: 0;
+  margin: 0 auto 0 0;
   font-size: 16px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -80,6 +81,126 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+/* 工具栏搜索：默认放大镜图标，点击后展开为输入框 */
+.toolbar-search {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.search-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--focus);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.25);
+  color: var(--fg);
+  animation: search-expand 160ms ease;
+}
+
+.search-field > svg {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  opacity: 0.6;
+}
+
+.toolbar-search-input {
+  width: 200px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  user-select: text;
+}
+
+.toolbar-search-input:focus,
+.toolbar-search-input:focus-visible {
+  outline: none;
+}
+
+.toolbar-search-input::-webkit-search-cancel-button {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.search-clear {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.search-clear:hover {
+  background: var(--hover);
+}
+
+.search-clear:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
+
+.search-clear > svg {
+  width: 14px;
+  height: 14px;
+}
+
+@keyframes search-expand {
+  from {
+    width: 32px;
+    opacity: 0.6;
+  }
+  to {
+    width: 260px;
+    opacity: 1;
+  }
+}
+
+/* 已安装 / 未安装过滤下拉 */
+.toolbar-filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filter-select {
+  height: 30px;
+  max-width: 150px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.filter-select:hover {
+  background: var(--hover);
+}
+
+.filter-select:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 .icon-button {
