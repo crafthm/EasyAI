@@ -88,6 +88,7 @@ pub fn find_existing(
     recipe: &Recipe,
     profile: &HardwareProfile,
     app_data: &Path,
+    install_root: Option<&Path>,
 ) -> Vec<ExistingInstall> {
     let mut found = Vec::new();
 
@@ -96,7 +97,7 @@ pub fn find_existing(
             continue;
         }
         if matches!(method.kind, crate::catalog::MethodKind::Release) {
-            let versions = versions_dir(app_data, &recipe.id);
+            let versions = versions_dir(app_data, install_root, &recipe.id);
             if let Ok(entries) = std::fs::read_dir(&versions) {
                 let mut versions: Vec<String> = entries
                     .filter_map(|entry| entry.ok())
@@ -108,7 +109,7 @@ pub fn find_existing(
                     found.push(ExistingInstall {
                         method_id: Some(method.id.clone()),
                         kind: "release".to_string(),
-                        location: versions_dir(app_data, &recipe.id)
+                        location: versions_dir(app_data, install_root, &recipe.id)
                             .join(version)
                             .to_string_lossy()
                             .to_string(),
@@ -196,20 +197,35 @@ pub fn binary_name(_recipe: &Recipe, method: &Method) -> Option<String> {
     None
 }
 
-pub fn apps_dir(app_data: &Path) -> PathBuf {
-    app_data.join("apps")
+/// Root directory for installed applications.
+///
+/// `install_root` overrides the default `<app_data>/apps`. It is resolved once
+/// at startup by [`crate::resolve_install_root`]; `None` means "use the
+/// default", which keeps the signature honest for callers that pass a root
+/// straight through. Everything else (database, downloads, logs, run files)
+/// stays under `app_data`.
+pub fn apps_dir(app_data: &Path, install_root: Option<&Path>) -> PathBuf {
+    match install_root {
+        Some(root) => root.to_path_buf(),
+        None => app_data.join("apps"),
+    }
 }
 
-pub fn app_dir(app_data: &Path, app_id: &str) -> PathBuf {
-    apps_dir(app_data).join(app_id)
+pub fn app_dir(app_data: &Path, install_root: Option<&Path>, app_id: &str) -> PathBuf {
+    apps_dir(app_data, install_root).join(app_id)
 }
 
-pub fn versions_dir(app_data: &Path, app_id: &str) -> PathBuf {
-    app_dir(app_data, app_id).join("versions")
+pub fn versions_dir(app_data: &Path, install_root: Option<&Path>, app_id: &str) -> PathBuf {
+    app_dir(app_data, install_root, app_id).join("versions")
 }
 
-pub fn version_dir(app_data: &Path, app_id: &str, version: &str) -> PathBuf {
-    versions_dir(app_data, app_id).join(version)
+pub fn version_dir(
+    app_data: &Path,
+    install_root: Option<&Path>,
+    app_id: &str,
+    version: &str,
+) -> PathBuf {
+    versions_dir(app_data, install_root, app_id).join(version)
 }
 
 pub fn downloads_dir(app_data: &Path) -> PathBuf {
@@ -503,11 +519,23 @@ mod tests {
             ram_mb: 8192,
             disk_mb: 1024,
         };
-        let found = super::find_existing(&recipe, &profile, &directory);
+        let found = super::find_existing(&recipe, &profile, &directory, None);
         assert!(found.iter().any(|install| {
             install.kind == "release" && install.version.as_deref() == Some("1.0.0")
         }));
         std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn an_install_root_replaces_the_default_apps_directory() {
+        let app_data = std::path::Path::new("/data");
+        let custom = std::path::Path::new("/opt/easyai");
+        assert_eq!(super::apps_dir(app_data, None), std::path::Path::new("/data/apps"));
+        assert_eq!(super::apps_dir(app_data, Some(custom)), custom);
+        assert_eq!(
+            super::version_dir(app_data, Some(custom), "demo", "1.0.0"),
+            std::path::Path::new("/opt/easyai/demo/versions/1.0.0")
+        );
     }
 
     #[test]

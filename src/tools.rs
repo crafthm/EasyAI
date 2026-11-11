@@ -119,6 +119,18 @@ pub const TOOLS: &[ToolSpec] = &[
         inputs: &["settings", "origin", "confirmed"],
     },
     ToolSpec {
+        name: "get_install_root",
+        description: "Read the directory new applications are installed into.",
+        mutating: false,
+        inputs: &[],
+    },
+    ToolSpec {
+        name: "save_install_root",
+        description: "Change the install root used for new installations.",
+        mutating: true,
+        inputs: &["path", "origin", "confirmed"],
+    },
+    ToolSpec {
         name: "get_job_log",
         description: "Read the persisted log of a lifecycle job.",
         mutating: false,

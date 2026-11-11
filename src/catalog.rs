@@ -608,6 +608,12 @@ impl Availability {
             } else if analysis.installer_only {
                 "The latest release only ships native installers, which this version cannot install automatically."
                     .to_string()
+            } else if analysis.assets_present {
+                // A release exists but nothing in it is runnable: data files,
+                // checksums, catalogs. Saying "probably a library" here is
+                // wrong and sends people looking for the wrong problem.
+                "The latest release contains no runnable binaries, only data files. No install method could be inferred."
+                    .to_string()
             } else {
                 "No installable artifact was found. This repository is probably a library, a plugin, or not a runnable application."
                     .to_string()
@@ -1480,6 +1486,158 @@ fn try_fetch_recipe(input: &str) -> Result<Option<(String, String)>, String> {
     Ok(Some((url.to_string(), content)))
 }
 
+/// A repository that distributes itself as an npm package.
+///
+/// Many projects publish binaries only through a registry, so their GitHub
+/// releases carry no archives at all — paperclipai/paperclip ships a single
+/// JSON file per release. Looking at `package.json` recovers those.
+#[derive(Debug, Clone, PartialEq)]
+struct NpmPackage {
+    /// `name` from the manifest, which is what `npm install` takes. It often
+    /// differs from the repository name.
+    name: String,
+    /// Primary `bin` entry, i.e. the command the package installs.
+    executable: String,
+    /// `engines.node`, kept verbatim for the requirements hint.
+    node: Option<String>,
+    /// Path of the manifest that matched, used in warnings.
+    manifest: String,
+    version: Option<String>,
+}
+
+/// Finds an installable npm package in the repository.
+///
+/// Monorepos keep the publishable manifest in a subdirectory and mark the root
+/// `private`, so the root manifest alone is not enough. Candidates are probed
+/// in order of likelihood and the first one that declares a `bin` wins.
+fn probe_npm_package(owner: &str, repo: &crate::github::RepoSummary) -> Option<NpmPackage> {
+    let branch = repo.default_branch.as_str();
+    if branch.is_empty() {
+        return None;
+    }
+    const CANDIDATES: [&str; 6] = [
+        "package.json",
+        "cli/package.json",
+        "packages/cli/package.json",
+        "server/package.json",
+        "packages/server/package.json",
+        "packages/core/package.json",
+    ];
+    for path in CANDIDATES {
+        let Ok(text) = crate::github::repo_file(owner, &repo.name, branch, path) else {
+            continue;
+        };
+        if let Some(package) = npm_package_from_manifest(&text, path) {
+            return Some(package);
+        }
+    }
+    None
+}
+
+/// Extracts the installable parts of a `package.json`.
+///
+/// `private: true` manifests are never published, so a `bin` there points at
+/// a script that `npm install <name>` cannot fetch.
+fn npm_package_from_manifest(text: &str, path: &str) -> Option<NpmPackage> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    if value.get("private").and_then(|item| item.as_bool()) == Some(true) {
+        return None;
+    }
+    let name = value.get("name").and_then(|item| item.as_str())?.trim();
+    if name.is_empty() || name.starts_with('.') || name.starts_with('/') {
+        return None;
+    }
+    let executable = npm_bin_name(value.get("bin")?, name)?;
+    Some(NpmPackage {
+        name: name.to_string(),
+        executable,
+        node: value
+            .get("engines")
+            .and_then(|engine| engine.get("node"))
+            .and_then(|item| item.as_str())
+            .map(str::to_string),
+        manifest: path.to_string(),
+        version: value
+            .get("version")
+            .and_then(|item| item.as_str())
+            .map(str::to_string),
+    })
+}
+
+/// Normalizes `bin` to the command name the package exposes.
+///
+/// `bin` is either a path string, in which case the command is the package
+/// name, or a map whose keys are the command names. Scoped packages strip the
+/// `@scope/` prefix because npm links the bare name.
+fn npm_bin_name(bin: &serde_json::Value, package: &str) -> Option<String> {
+    let candidate = match bin {
+        serde_json::Value::String(_) => package.rsplit('/').next().unwrap_or(package),
+        serde_json::Value::Object(entries) => entries.keys().next()?.as_str(),
+        _ => return None,
+    };
+    let candidate = candidate.trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+/// Operating systems an npm method covers. Node runs on every architecture, so
+/// no arch filter is applied.
+const NPM_PLATFORMS: [&str; 3] = ["linux", "macos", "windows"];
+
+/// Builds the npm install method.
+///
+/// `npm install --prefix <app>` puts the shim in `node_modules/.bin`, so the
+/// recorded executable is that path rather than `<app>/bin`.
+fn npm_method(package: &NpmPackage) -> Method {
+    Method {
+        id: "npm".to_string(),
+        kind: MethodKind::Language,
+        when: MethodWhen {
+            os: NPM_PLATFORMS.iter().map(|os| os.to_string()).collect(),
+            // Empty means "any architecture"; npm packages are not arch-specific.
+            arch: Vec::new(),
+            ..Default::default()
+        },
+        prefer: 70,
+        advanced: false,
+        elevation: false,
+        version: Some(VersionSource {
+            kind: "npm".to_string(),
+            repo: None,
+            command: None,
+            package: Some(package.name.clone()),
+            image: None,
+        }),
+        service: None,
+        uninstall: Some(Uninstall {
+            keep_paths: Vec::new(),
+            remove_paths: Vec::new(),
+            command: None,
+            native: true,
+        }),
+        size: None,
+        source: None,
+        image: None,
+        package: None,
+        language: Some(LanguageSpec {
+            ecosystem: "npm".to_string(),
+            package: package.name.clone(),
+            version: None,
+            index: None,
+            extra_index: None,
+            manager: Some("npm".to_string()),
+            executable: Some(
+                format!("{{install_dir}}/node_modules/.bin/{}", package.executable),
+            ),
+        }),
+        script: None,
+        universal: None,
+        usage: None,
+    }
+}
+
 /// Builds a candidate recipe from repository metadata and its latest release.
 /// Without a usable archive the recipe stays a metadata-only draft.
 fn candidate_recipe(
@@ -1518,11 +1676,23 @@ fn candidate_recipe(
         }
     }
 
-    let methods: Vec<Method> = assets
+    let mut methods: Vec<Method> = assets
         .iter()
         .map(|(platform, (_, asset))| release_method(&full_repo, platform, asset))
         .collect();
     let mut warnings = Vec::new();
+    let release_count = methods.len();
+    // Only consult the registry when the release has nothing runnable. When it
+    // does, a second method would compete with a download that is already
+    // known to work.
+    let npm = if methods.is_empty() {
+        probe_npm_package(owner, repo)
+    } else {
+        None
+    };
+    if let Some(package) = &npm {
+        methods.push(npm_method(package));
+    }
     if methods.is_empty() {
         warnings.push(
             "No usable release archive was found. The app will be added as a draft without an install method."
@@ -1534,17 +1704,35 @@ fn candidate_recipe(
                     .to_string(),
             );
         }
+    } else if release_count == 0 {
+        let package = npm.as_ref().expect("npm method implies a probe result");
+        warnings.push(format!(
+            "The GitHub release ships no runnable binary. An npm install method was inferred from {} (package '{}'). Review it before installing.",
+            package.manifest, package.name
+        ));
+        if let Some(version) = &package.version {
+            warnings.push(format!(
+                "The manifest declares version {version}; the installed version is read from the registry."
+            ));
+        }
     } else {
         warnings.push(
             "Install method inferred from the latest GitHub Release. Review it before installing."
                 .to_string(),
         );
-        if inference.and_then(|inference| inference.launch.as_ref()).is_none() {
-            warnings.push(
-                "No start command was inferred. Start/Stop will not work until the recipe is edited."
-                    .to_string(),
-            );
-        }
+    }
+    if release_count > 0
+        && inference.and_then(|inference| inference.launch.as_ref()).is_none()
+    {
+        warnings.push(
+            "No start command was inferred. Start/Stop will not work until the recipe is edited."
+                .to_string(),
+        );
+    }
+    if let Some(node) = npm.as_ref().and_then(|package| package.node.as_deref()) {
+        warnings.push(format!(
+            "This package requires Node {node}. Install will fail if the local Node is older."
+        ));
     }
 
     let mut usage = repo.homepage.as_ref().map(|homepage| Usage {
@@ -1577,7 +1765,13 @@ fn candidate_recipe(
         color: String::new(),
         icon: repo.logo.clone().unwrap_or_default(),
         draft: methods.is_empty(),
-        platforms: assets.keys().cloned().collect(),
+        platforms: if npm.is_some() {
+            // An npm method is architecture-agnostic; advertising the release
+            // platforms here would claim less than it can install.
+            NPM_PLATFORMS.iter().map(|item| item.to_string()).collect()
+        } else {
+            assets.keys().cloned().collect()
+        },
         category,
         methods,
         usage,
@@ -1588,6 +1782,7 @@ fn candidate_recipe(
     let analysis = DraftAnalysis {
         detected_platforms: detected.into_iter().collect(),
         installer_only,
+        assets_present: release.is_some_and(|release| !release.assets.is_empty()),
     };
     (recipe, warnings, analysis)
 }
@@ -1598,6 +1793,10 @@ fn candidate_recipe(
 struct DraftAnalysis {
     detected_platforms: Vec<String>,
     installer_only: bool,
+    /// A release exists and carries at least one asset, none of which is
+    /// runnable. Distinguishes "we looked and found data files" from "there was
+    /// nothing to look at".
+    assets_present: bool,
 }
 
 fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
@@ -2087,6 +2286,7 @@ mod tests {
             description: Some("CAD".to_string()),
             homepage: None,
             logo: None,
+            default_branch: "main".to_string(),
         };
         let release = crate::github::ReleaseInfo {
             tag_name: "v1.0.0".to_string(),
@@ -2112,6 +2312,105 @@ mod tests {
                 .contains("macos"),
             "the hint should name the platforms the release publishes for"
         );
+    }
+
+    #[test]
+    fn npm_manifest_with_string_bin_uses_the_package_name() {
+        let package = super::npm_package_from_manifest(
+            r#"{"name":"paperclipai","bin":"dist/index.js","engines":{"node":">=24.11.0"}}"#,
+            "cli/package.json",
+        )
+        .unwrap();
+        assert_eq!(package.name, "paperclipai");
+        assert_eq!(package.executable, "paperclipai");
+        assert_eq!(package.node.as_deref(), Some(">=24.11.0"));
+        assert_eq!(package.manifest, "cli/package.json");
+    }
+
+    #[test]
+    fn scoped_package_bin_strips_the_scope() {
+        let package = super::npm_package_from_manifest(
+            r#"{"name":"@acme/tool","bin":"bin/run.js"}"#,
+            "package.json",
+        )
+        .unwrap();
+        assert_eq!(package.executable, "tool");
+    }
+
+    #[test]
+    fn bin_map_takes_the_first_command() {
+        let package = super::npm_package_from_manifest(
+            r#"{"name":"tool","bin":{"tool":"a.js","tool-helper":"b.js"}}"#,
+            "package.json",
+        )
+        .unwrap();
+        assert_eq!(package.executable, "tool");
+    }
+
+    #[test]
+    fn private_manifest_is_not_installable() {
+        // The root manifest of a monorepo is private and carries no `bin`; the
+        // published package lives in a subdirectory. Treating the root as
+        // installable would produce `npm install <repo name>` and fail.
+        assert!(super::npm_package_from_manifest(
+            r#"{"name":"paperclip","private":true,"packageManager":"pnpm@9"}"#,
+            "package.json",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn manifest_without_bin_is_not_installable() {
+        assert!(super::npm_package_from_manifest(
+            r#"{"name":"some-library","main":"index.js"}"#,
+            "package.json",
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn npm_method_records_the_dot_bin_path_and_targets_t2() {
+        let package = super::NpmPackage {
+            name: "paperclipai".to_string(),
+            executable: "paperclipai".to_string(),
+            node: None,
+            manifest: "cli/package.json".to_string(),
+            version: None,
+        };
+        let method = super::npm_method(&package);
+        let language = method.language.as_ref().unwrap();
+        assert_eq!(language.ecosystem, "npm");
+        assert_eq!(language.package, "paperclipai");
+        // `npm install --prefix` links the shim into node_modules/.bin, not bin/.
+        assert_eq!(
+            language.executable.as_deref(),
+            Some("{install_dir}/node_modules/.bin/paperclipai")
+        );
+        // npm is a language-ecosystem channel, which resolve.rs maps to T2.
+        assert_eq!(crate::resolve::tier_for(&method), "T2");
+        assert!(method.when.matches_platform("linux", "aarch64"));
+        assert!(method.when.matches_platform("macos", "x86_64"));
+    }
+
+    #[test]
+    fn data_only_release_reports_data_files_instead_of_a_library() {
+        // paperclipai/paperclip ships a single JSON file per release. The old
+        // hint told users the repository was probably a library.
+        let recipe = parse(json!({
+            "id": "owner-repo",
+            "name": "repo",
+            "draft": true
+        }));
+        let analysis = super::DraftAnalysis {
+            assets_present: true,
+            ..Default::default()
+        };
+        let hint = super::Availability::describe(&recipe, "linux-x86_64", &analysis)
+            .unwrap()
+            .hint
+            .unwrap();
+        assert!(hint.contains("data files"), "{hint}");
+        assert!(!hint.contains("library"), "{hint}");
     }
 
     #[test]
@@ -2164,6 +2463,7 @@ mod tests {
                 "https://raw.githubusercontent.com/tangency-labs/solidcraft/main/assets/app-icon.png"
                     .to_string(),
             ),
+            default_branch: "main".to_string(),
         };
         let asset = |name: &str| crate::github::ReleaseAsset {
             name: name.to_string(),
@@ -2457,6 +2757,7 @@ mod tests {
             description: Some("AI Native Video workspace".to_string()),
             homepage: Some("https://beeftv.app/".to_string()),
             logo: None,
+            default_branch: "main".to_string(),
         };
         let release = crate::github::ReleaseInfo {
             tag_name: "v2.1.6".to_string(),

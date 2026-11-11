@@ -281,6 +281,7 @@ pub fn install(
     app: &AppHandle,
     db_path: &Path,
     app_data: &Path,
+    install_root: Option<&Path>,
     recipe: &Recipe,
     method: &Method,
     log: &mut JobLogger,
@@ -290,6 +291,7 @@ pub fn install(
         recipe,
         method,
         app_data,
+        install_root,
         platform: &platform,
     };
     match methods::install(&context, log) {
@@ -301,7 +303,7 @@ pub fn install(
             Ok(())
         }
         Err(err) => {
-            let _ = fs::remove_dir_all(probe::app_dir(app_data, &recipe.id));
+            let _ = fs::remove_dir_all(probe::app_dir(app_data, install_root, &recipe.id));
             Err(err)
         }
     }
@@ -311,6 +313,7 @@ pub fn start(
     app: &AppHandle,
     db_path: &Path,
     app_data: &Path,
+    install_root: Option<&Path>,
     recipe: &Recipe,
     method: &Method,
     log: &mut JobLogger,
@@ -327,6 +330,7 @@ pub fn start(
         recipe,
         method,
         app_data,
+        install_root,
         platform: &platform,
     };
     match methods::start(&context, &record, log) {
@@ -353,6 +357,7 @@ pub fn stop(
     app: &AppHandle,
     db_path: &Path,
     app_data: &Path,
+    install_root: Option<&Path>,
     recipe: &Recipe,
     method: &Method,
     log: &mut JobLogger,
@@ -369,6 +374,7 @@ pub fn stop(
         recipe,
         method,
         app_data,
+        install_root,
         platform: &platform,
     };
     match methods::stop(&context, &record, log) {
@@ -390,6 +396,7 @@ pub fn uninstall(
     app: &AppHandle,
     db_path: &Path,
     app_data: &Path,
+    install_root: Option<&Path>,
     recipe: &Recipe,
     method: &Method,
     log: &mut JobLogger,
@@ -406,6 +413,7 @@ pub fn uninstall(
         recipe,
         method,
         app_data,
+        install_root,
         platform: &platform,
     };
     match methods::uninstall(&context, &record, log) {

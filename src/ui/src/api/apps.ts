@@ -342,6 +342,29 @@ export function saveMethodSettings(settings: MethodSettings): Promise<void> {
   })
 }
 
+export type InstallRootInfo = {
+  /** Directory new installs land in right now. */
+  root: string
+  /** The built-in `<app data>/apps` location, used when nothing is configured. */
+  defaultRoot: string
+  /** Raw persisted value; empty when unset. */
+  configured: string
+  /** True when the saved value differs from the one in effect this session. */
+  restartRequired: boolean
+}
+
+export function getInstallRoot(): Promise<InstallRootInfo> {
+  return invoke('get_install_root')
+}
+
+export function saveInstallRoot(path: string): Promise<InstallRootInfo> {
+  return invoke('save_install_root', {
+    path,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
 export function checkUpdates(appId: string): Promise<UpdateStatus> {
   return invoke('check_updates', { appId })
 }

@@ -18,6 +18,8 @@ pub struct MethodContext<'a> {
     pub recipe: &'a Recipe,
     pub method: &'a Method,
     pub app_data: &'a Path,
+    /// Overrides where apps are installed; `None` keeps `<app_data>/apps`.
+    pub install_root: Option<&'a Path>,
     pub platform: &'a str,
 }
 
@@ -32,7 +34,7 @@ pub struct Bom {
 }
 
 pub fn install(ctx: &MethodContext<'_>, log: &mut JobLogger) -> Result<InstalledApp, String> {
-    let app_dir = probe::app_dir(ctx.app_data, &ctx.recipe.id);
+    let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
     let app = match ctx.method.kind {
         MethodKind::Release => install_release(ctx, log)?,
         MethodKind::Portable => install_portable(ctx, &app_dir, log)?,
@@ -270,7 +272,8 @@ pub fn uninstall(
         .ok_or_else(|| "Method has no uninstall behavior.".to_string())?;
 
     if let Some(command) = &uninstall.command {
-        let command = expand_command(command, record, &probe::app_dir(ctx.app_data, &ctx.recipe.id));
+        let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
+        let command = expand_command(command, record, &app_dir);
         run_command(&command, None, &HashMap::new(), log)?;
     }
 
@@ -334,10 +337,11 @@ pub fn uninstall(
         _ => {}
     }
 
+    let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
     for path in uninstall
         .remove_paths
         .iter()
-        .map(|path| expand_path(path, record, &probe::app_dir(ctx.app_data, &ctx.recipe.id)))
+        .map(|path| expand_path(path, record, &app_dir))
     {
         if path.exists() {
             if path.is_dir() {
@@ -349,7 +353,7 @@ pub fn uninstall(
             }
         }
     }
-    let app_dir = probe::app_dir(ctx.app_data, &ctx.recipe.id);
+    let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
     if !matches!(
         ctx.method.kind,
         MethodKind::PackageManager | MethodKind::Container | MethodKind::Universal
@@ -426,11 +430,11 @@ fn install_release(
     let archive = downloads.join(format!("{version}-{asset_name}"));
     ensure_archive(&asset.url, &archive, source.sha256.as_deref(), log)?;
 
-    let versions = probe::versions_dir(ctx.app_data, &ctx.recipe.id);
+    let versions = probe::versions_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
     fs::create_dir_all(&versions)
         .map_err(|err| format!("Failed to create install directory: {err}"))?;
     let staging = versions.join(format!(".staging-{version}"));
-    let install_dir = probe::version_dir(ctx.app_data, &ctx.recipe.id, &version);
+    let install_dir = probe::version_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id, &version);
     if staging.exists() {
         let _ = fs::remove_dir_all(&staging);
     }
@@ -1017,7 +1021,7 @@ fn verify_binary(ctx: &MethodContext<'_>, app: &InstalledApp, log: &mut JobLogge
     let command = expand_command(
         &service.command,
         app,
-        &probe::app_dir(ctx.app_data, &ctx.recipe.id),
+        &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
     );
     let output = run_command(
         &[command[0].clone(), "--version".to_string()],
@@ -1041,7 +1045,7 @@ fn service_command(ctx: &MethodContext<'_>, record: &InstalledApp) -> Result<Vec
     Ok(expand_command(
         &service.command,
         record,
-        &probe::app_dir(ctx.app_data, &ctx.recipe.id),
+        &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
     ))
 }
 

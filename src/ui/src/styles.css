@@ -770,9 +770,106 @@ body {
   color: #e5484d;
 }
 
-/* 安装方式优先级设置 */
+/* 设置弹窗 */
 .settings-popover {
   width: 640px;
+}
+
+/* Tab 分页：底边框贯穿，选中项用一道内阴影式下划线标识 */
+.settings-tabs {
+  display: flex;
+  gap: 2px;
+  margin: 0 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-tab {
+  position: relative;
+  padding: 7px 12px 8px;
+  border: none;
+  border-radius: 8px 8px 0 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  opacity: 0.6;
+  cursor: pointer;
+  transition:
+    opacity 120ms ease,
+    background-color 120ms ease;
+}
+
+.settings-tab:hover {
+  background: rgba(127, 127, 127, 0.1);
+  opacity: 0.85;
+}
+
+.settings-tab--active {
+  opacity: 1;
+}
+
+/* 用伪元素画下划线，避免影响 tab 自身高度 */
+.settings-tab--active::after {
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  border-radius: 2px 2px 0 0;
+  background: var(--focus);
+  content: '';
+}
+
+.settings-tab:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+/* 存储 tab 的表单字段 */
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.settings-field-label {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.settings-input:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.settings-field-hint {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  opacity: 0.7;
+}
+
+/* 已保存但需重启生效时的提醒 */
+.settings-warning {
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(245, 158, 11, 0.14);
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 .settings-hint {

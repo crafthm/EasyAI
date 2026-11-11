@@ -3,7 +3,12 @@ import { CloseIcon, GearIcon, PlusIcon, SearchIcon } from './icons'
 import { ImportDialog } from './ImportDialog'
 import { SettingsPopover } from './SettingsPopover'
 
-export type InstallFilter = 'all' | 'installed' | 'not_installed'
+export type InstallFilter =
+  | 'all'
+  | 'installed'
+  | 'not_installed'
+  | 'running'
+  | 'update_available'
 
 type Props = {
   onImported: () => void
@@ -17,6 +22,8 @@ const FILTERS: { value: InstallFilter; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'installed', label: 'Installed' },
   { value: 'not_installed', label: 'Not installed' },
+  { value: 'running', label: 'Running' },
+  { value: 'update_available', label: 'Update available' },
 ]
 
 export function Toolbar({
@@ -113,7 +120,9 @@ export function Toolbar({
           >
             <PlusIcon />
           </button>
-          <div className="popover-anchor">
+          {/* data-settings-anchor marks the button + popover as one unit, so
+              the popover's outside-click handler lets the gear toggle. */}
+          <div className="popover-anchor" data-settings-anchor>
             <button
               type="button"
               className="icon-button"

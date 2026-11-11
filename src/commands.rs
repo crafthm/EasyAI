@@ -38,6 +38,7 @@ fn load_method_settings(db_path: &Path) -> MethodSettings {
 fn plan_for(
     db_path: &Path,
     app_data: &Path,
+    install_root: Option<&Path>,
     app_id: &str,
     method_id: Option<String>,
     allow_advanced: bool,
@@ -46,7 +47,7 @@ fn plan_for(
 ) -> Result<(Recipe, Method, InstallPlan), String> {
     let recipe = catalog::find(app_data, app_id)?.recipe;
     let profile = probe::collect(app_data)?;
-    let existing = probe::find_existing(&recipe, &profile, app_data);
+    let existing = probe::find_existing(&recipe, &profile, app_data, install_root);
     let preferences = Preferences {
         allow_elevation,
         allow_advanced,
@@ -103,13 +104,22 @@ async fn run_job<F>(
     work: F,
 ) -> Result<(), String>
 where
-    F: FnOnce(&AppHandle, &Path, &Path, &Recipe, &Method, &mut JobLogger) -> Result<(), String>
+    F: FnOnce(
+            &AppHandle,
+            &Path,
+            &Path,
+            Option<&Path>,
+            &Recipe,
+            &Method,
+            &mut JobLogger,
+        ) -> Result<(), String>
         + Send
         + 'static,
 {
     let origin = authorize(tool, origin, confirmed)?;
     let db_path = state.db_path.clone();
     let app_data = state.app_data_dir.clone();
+    let install_root = state.install_root.clone();
     let jobs = Arc::clone(&state.jobs);
 
     let guard = jobs.try_begin(&app_id, phase)?;
@@ -136,7 +146,15 @@ where
             let method = recipe
                 .method(&job_method_id)
                 .ok_or_else(|| format!("Unknown method '{job_method_id}'."))?;
-            work(&app_for_job, &db_path, &app_data, &recipe, method, &mut log)
+            work(
+                &app_for_job,
+                &db_path,
+                &app_data,
+                install_root.as_deref(),
+                &recipe,
+                method,
+                &mut log,
+            )
         })();
         if result.is_err() {
             drop(guard);
@@ -202,10 +220,12 @@ pub async fn plan_install(
 ) -> Result<InstallPlan, String> {
     let app_data = state.app_data_dir.clone();
     let db_path = state.db_path.clone();
+    let install_root = state.install_root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         plan_for(
             &db_path,
             &app_data,
+            install_root.as_deref(),
             &app_id,
             method_id,
             allow_advanced.unwrap_or(false),
@@ -232,11 +252,13 @@ pub async fn install_app(
 ) -> Result<(), String> {
     let app_data = state.app_data_dir.clone();
     let db_path = state.db_path.clone();
+    let install_root = state.install_root.clone();
     let requested = app_id.clone();
     let (method_id, plan_json) = tauri::async_runtime::spawn_blocking(move || {
         let (_, method, plan) = plan_for(
             &db_path,
             &app_data,
+            install_root.as_deref(),
             &requested,
             method_id,
             allow_advanced.unwrap_or(false),
@@ -270,8 +292,8 @@ pub async fn install_app(
         Some(plan_json),
         origin,
         confirmed,
-        |app, db_path, app_data, recipe, method, log| {
-            lifecycle::install(app, db_path, app_data, recipe, method, log)
+        |app, db_path, app_data, install_root, recipe, method, log| {
+            lifecycle::install(app, db_path, app_data, install_root, recipe, method, log)
         },
     )
     .await
@@ -298,8 +320,8 @@ pub async fn start_app(
         None,
         origin,
         confirmed,
-        |app, db_path, app_data, recipe, method, log| {
-            lifecycle::start(app, db_path, app_data, recipe, method, log)
+        |app, db_path, app_data, install_root, recipe, method, log| {
+            lifecycle::start(app, db_path, app_data, install_root, recipe, method, log)
         },
     )
     .await
@@ -326,8 +348,8 @@ pub async fn stop_app(
         None,
         origin,
         confirmed,
-        |app, db_path, app_data, recipe, method, log| {
-            lifecycle::stop(app, db_path, app_data, recipe, method, log)
+        |app, db_path, app_data, install_root, recipe, method, log| {
+            lifecycle::stop(app, db_path, app_data, install_root, recipe, method, log)
         },
     )
     .await
@@ -354,8 +376,8 @@ pub async fn uninstall_app(
         None,
         origin,
         confirmed,
-        |app, db_path, app_data, recipe, method, log| {
-            lifecycle::uninstall(app, db_path, app_data, recipe, method, log)
+        |app, db_path, app_data, install_root, recipe, method, log| {
+            lifecycle::uninstall(app, db_path, app_data, install_root, recipe, method, log)
         },
     )
     .await
@@ -726,6 +748,77 @@ pub async fn save_method_settings(
     })
     .await
     .map_err(|err| format!("Failed to save method settings: {err}"))?
+}
+
+/// The install location as it stands right now.
+///
+/// `defaultRoot` is what `<app_data>/apps` resolves to, so the UI can show the
+/// fallback without duplicating the path logic. `configured` is the raw setting
+/// (empty when unset) and `root` is the effective directory.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallRootInfo {
+    pub root: String,
+    pub default_root: String,
+    pub configured: String,
+    pub restart_required: bool,
+}
+
+fn install_root_info(state: &AppState) -> InstallRootInfo {
+    let default_root = probe::apps_dir(&state.app_data_dir, None);
+    let configured = db::get_setting(&state.db_path, crate::INSTALL_ROOT_KEY)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let desired = crate::resolve_install_root(&state.db_path).unwrap_or(None);
+    InstallRootInfo {
+        root: state
+            .install_root
+            .clone()
+            .unwrap_or_else(|| default_root.clone())
+            .to_string_lossy()
+            .to_string(),
+        default_root: default_root.to_string_lossy().to_string(),
+        configured,
+        // The path is read once at startup, so a saved change only takes
+        // effect on the next launch.
+        restart_required: desired != state.install_root,
+    }
+}
+
+#[tauri::command]
+pub async fn get_install_root(state: State<'_, AppState>) -> Result<InstallRootInfo, String> {
+    Ok(install_root_info(&state))
+}
+
+#[tauri::command]
+pub async fn save_install_root(
+    state: State<'_, AppState>,
+    path: String,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<InstallRootInfo, String> {
+    authorize("save_install_root", origin, confirmed)?;
+    let trimmed = path.trim().to_string();
+    if !trimmed.is_empty() {
+        let candidate = std::path::PathBuf::from(&trimmed);
+        if !candidate.is_absolute() {
+            return Err("The install root must be an absolute path.".to_string());
+        }
+        // Creating it up front turns a typo or a permission problem into an
+        // immediate error instead of a failed install later on.
+        std::fs::create_dir_all(&candidate)
+            .map_err(|err| format!("Failed to create {}: {err}", candidate.display()))?;
+    }
+    let db_path = state.db_path.clone();
+    let stored = trimmed.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        db::set_setting(&db_path, crate::INSTALL_ROOT_KEY, &stored)
+            .map_err(|err| format!("Failed to save the install root: {err}"))
+    })
+    .await
+    .map_err(|err| format!("Failed to save the install root: {err}"))??;
+    Ok(install_root_info(&state))
 }
 
 #[tauri::command]

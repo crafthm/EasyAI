@@ -167,6 +167,8 @@ pub struct RepoSummary {
     pub description: Option<String>,
     pub homepage: Option<String>,
     pub logo: Option<String>,
+    /// Branch the manifest probe reads from; empty when GitHub omitted it.
+    pub default_branch: String,
 }
 
 #[derive(Deserialize)]
@@ -237,7 +239,16 @@ pub fn repo_summary(owner: &str, name: &str) -> Result<RepoSummary, String> {
             .homepage
             .filter(|url| url.starts_with("http://") || url.starts_with("https://")),
         logo,
+        default_branch: repo.default_branch.unwrap_or_default(),
     })
+}
+
+/// Reads a file from the repository through the raw content host.
+///
+/// Used by the import probe to inspect manifests without cloning. Returns an
+/// error for a missing file, so callers can treat "no package.json" as absent.
+pub fn repo_file(owner: &str, name: &str, branch: &str, path: &str) -> Result<String, String> {
+    read_repo_file(owner, name, branch, path)
 }
 
 /// How many candidates are probed before giving up. Keeps the import preview

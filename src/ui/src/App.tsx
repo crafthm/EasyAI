@@ -9,6 +9,12 @@ import { useApps } from './hooks/useApps'
 function matchesFilter(app: AppSummary, filter: InstallFilter): boolean {
   if (filter === 'installed') return app.state !== 'not_installed'
   if (filter === 'not_installed') return app.state === 'not_installed'
+  // Only apps whose service is up count as started; `starting` is still in
+  // flight, so it is left out until the state settles.
+  if (filter === 'running') return app.state === 'running'
+  // `updateAvailable` carries the newest published version when it is newer
+  // than the installed one, so it doubles as the "has an update" marker.
+  if (filter === 'update_available') return Boolean(app.updateAvailable)
   return true
 }
 

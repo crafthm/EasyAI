@@ -112,7 +112,9 @@ export function AppTile({ app, onOpen }: Props) {
       <button
         type="button"
         className="app-tile-button"
-        aria-label={`${app.name}, ${state}. Open details.`}
+        aria-label={`${app.name}, ${state}${
+          app.updateAvailable ? `, update available ${app.updateAvailable}` : ''
+        }. Open details.`}
         onClick={() => onOpen(app.id)}
       >
         <span
