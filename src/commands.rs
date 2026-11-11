@@ -11,6 +11,7 @@ use crate::lifecycle::{self, AppDetail, AppSummary};
 use crate::probe;
 use crate::resolve::{self, InstallPlan, MethodSettings, Preferences, TIERS};
 use crate::tools::{self, ToolSpec};
+use crate::update::{self, UpdateStatus};
 use crate::usage::{self, DetectedEntry, UsageReport};
 use crate::usage_infer;
 use crate::AppState;
@@ -41,6 +42,7 @@ fn plan_for(
     method_id: Option<String>,
     allow_advanced: bool,
     allow_elevation: bool,
+    upgrade: bool,
 ) -> Result<(Recipe, Method, InstallPlan), String> {
     let recipe = catalog::find(app_data, app_id)?.recipe;
     let profile = probe::collect(app_data)?;
@@ -49,7 +51,9 @@ fn plan_for(
         allow_elevation,
         allow_advanced,
         preferred_method: method_id,
-        replace_existing: false,
+        // An upgrade deliberately replaces the installed copy, so the resolver
+        // must not settle on "adopt" and block the install.
+        replace_existing: upgrade,
         settings: load_method_settings(db_path),
     };
     let plan = resolve::resolve(&recipe, &profile, &preferences, &existing)?;
@@ -194,6 +198,7 @@ pub async fn plan_install(
     method_id: Option<String>,
     allow_advanced: Option<bool>,
     allow_elevation: Option<bool>,
+    upgrade: Option<bool>,
 ) -> Result<InstallPlan, String> {
     let app_data = state.app_data_dir.clone();
     let db_path = state.db_path.clone();
@@ -205,6 +210,7 @@ pub async fn plan_install(
             method_id,
             allow_advanced.unwrap_or(false),
             allow_elevation.unwrap_or(false),
+            upgrade.unwrap_or(false),
         )
         .map(|(_, _, plan)| plan)
     })
@@ -220,6 +226,7 @@ pub async fn install_app(
     method_id: Option<String>,
     allow_advanced: Option<bool>,
     allow_elevation: Option<bool>,
+    upgrade: Option<bool>,
     origin: Option<String>,
     confirmed: Option<bool>,
 ) -> Result<(), String> {
@@ -234,6 +241,7 @@ pub async fn install_app(
             method_id,
             allow_advanced.unwrap_or(false),
             allow_elevation.unwrap_or(false),
+            upgrade.unwrap_or(false),
         )?;
         if plan.action == "adopt" {
             return Err(format!(
@@ -561,6 +569,43 @@ pub async fn reinfer_usage(
     tauri::async_runtime::spawn_blocking(move || reinfer_usage_blocking(&app_data, &app_id))
         .await
         .map_err(|err| format!("Failed to re-analyze usage: {err}"))?
+}
+
+#[tauri::command]
+pub async fn check_updates(
+    state: State<'_, AppState>,
+    app_id: String,
+) -> Result<UpdateStatus, String> {
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || update::check(&db_path, &app_data, &app_id))
+        .await
+        .map_err(|err| format!("Failed to check for updates: {err}"))?
+}
+
+#[tauri::command]
+pub async fn check_all_updates(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Vec<UpdateStatus>, String> {
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(update::check_all(&app, &db_path, &app_data))
+    })
+    .await
+    .map_err(|err| format!("Failed to check for updates: {err}"))?
+}
+
+#[tauri::command]
+pub async fn get_update_status(
+    state: State<'_, AppState>,
+    app_id: String,
+) -> Result<Option<UpdateStatus>, String> {
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(update::cached(&db_path, &app_id)))
+        .await
+        .map_err(|err| format!("Failed to load the update status: {err}"))?
 }
 
 fn reinfer_usage_blocking(app_data: &Path, app_id: &str) -> Result<(), String> {

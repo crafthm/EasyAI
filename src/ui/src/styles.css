@@ -350,8 +350,9 @@ body {
   align-content: start;
 }
 
-/* 相对定位容器：只在容器内定位 Logo、遮罩与状态点 */
+/* 相对定位容器：只在容器内定位 Logo、遮罩、状态点与更新角标 */
 .app-tile {
+  position: relative;
   align-self: start;
 }
 
@@ -427,6 +428,8 @@ body {
   white-space: nowrap;
   font-size: 13px;
   font-weight: 500;
+  /* 固定行高，更新角标的偏移量据此计算 */
+  line-height: 16px;
   color: var(--fg);
 }
 
@@ -922,6 +925,24 @@ body {
 
 .usage-badge--inferred {
   color: #6366f1;
+}
+
+.update-badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--hover);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  vertical-align: middle;
+  color: #d97706;
+}
+
+.update-badge--current {
+  color: #16a34a;
 }
 
 .usage-confidence {

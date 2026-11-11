@@ -7,6 +7,8 @@ import {
 
 type Props = {
   app: AppSummary
+  /** Set when the dialog was opened from "Update to …". */
+  upgrade?: boolean
   onClose: () => void
   onInstalled: () => void
   install: (
@@ -14,11 +16,13 @@ type Props = {
     methodId: string | null,
     allowAdvanced: boolean,
     allowElevation: boolean,
+    upgrade?: boolean,
   ) => Promise<void>
 }
 
 export function InstallPlanDialog({
   app,
+  upgrade = false,
   onClose,
   onInstalled,
   install,
@@ -32,7 +36,7 @@ export function InstallPlanDialog({
 
   useEffect(() => {
     let disposed = false
-    planInstall(app.id, null, allowAdvanced, allowElevation)
+    planInstall(app.id, null, allowAdvanced, allowElevation, upgrade)
       .then((next) => {
         if (!disposed) setPlan(next)
       })
@@ -48,7 +52,7 @@ export function InstallPlanDialog({
     return () => {
       disposed = true
     }
-  }, [app.id, allowAdvanced, allowElevation])
+  }, [app.id, allowAdvanced, allowElevation, upgrade])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -63,7 +67,13 @@ export function InstallPlanDialog({
     setBusy(true)
     setError(null)
     try {
-      await install(app.id, plan.methodId, allowAdvanced, allowElevation)
+      await install(
+        app.id,
+        plan.methodId,
+        allowAdvanced,
+        allowElevation,
+        upgrade,
+      )
       onInstalled()
       onClose()
     } catch (err) {
@@ -88,7 +98,9 @@ export function InstallPlanDialog({
         aria-label={`Install ${app.name}`}
       >
         <header className="import-header">
-          <h2 className="import-title">Install {app.name}</h2>
+          <h2 className="import-title">
+            {upgrade ? 'Update' : 'Install'} {app.name}
+          </h2>
           <button
             type="button"
             className="icon-button"
@@ -220,7 +232,13 @@ export function InstallPlanDialog({
             disabled={!plan || loading || busy || adopt}
             onClick={() => void handleInstall()}
           >
-            {busy ? 'Installing…' : 'Install'}
+            {busy
+              ? upgrade
+                ? 'Updating…'
+                : 'Installing…'
+              : upgrade
+                ? 'Update'
+                : 'Install'}
           </button>
         </div>
       </section>

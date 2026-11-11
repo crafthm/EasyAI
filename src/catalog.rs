@@ -1656,11 +1656,10 @@ enum Packaging {
     Installer,
 }
 
-/// Downloadable release formats, best first. Archives rank before native
-/// installers because they can be installed without elevation.
-fn asset_rank(name: &str) -> Option<(u8, Packaging)> {
-    let lower = name.to_ascii_lowercase();
-    if lower.ends_with(".sha256")
+/// Whether an asset is something a user could install, rather than a checksum,
+/// signature, debug symbols, or a source tarball published alongside it.
+fn is_distributable(lower: &str) -> bool {
+    !(lower.ends_with(".sha256")
         || lower.contains("sha256sum")
         || lower.ends_with(".sig")
         || lower.ends_with(".asc")
@@ -1671,8 +1670,14 @@ fn asset_rank(name: &str) -> Option<(u8, Packaging)> {
         || lower.contains("_source")
         || lower.contains("symbols")
         || lower.contains("debug")
-        || lower.contains("checksum")
-    {
+        || lower.contains("checksum"))
+}
+
+/// Downloadable release formats, best first. Archives rank before native
+/// installers because they can be installed without elevation.
+fn asset_rank(name: &str) -> Option<(u8, Packaging)> {
+    let lower = name.to_ascii_lowercase();
+    if !is_distributable(&lower) {
         return None;
     }
     let archive = if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
@@ -1698,11 +1703,6 @@ fn asset_rank(name: &str) -> Option<(u8, Packaging)> {
         .iter()
         .any(|suffix| lower.ends_with(suffix))
         .then_some((5, Packaging::Installer))
-}
-
-/// Kept for callers that only need to know whether an asset is downloadable.
-fn archive_rank(name: &str) -> Option<u8> {
-    asset_rank(name).map(|(rank, _)| rank)
 }
 
 /// The operating system an asset targets, when it can be determined from the
@@ -1765,6 +1765,9 @@ fn asset_archs(lower: &str) -> Vec<&'static str> {
 
 fn platforms_for_asset(name: &str) -> Vec<String> {
     let lower = name.to_ascii_lowercase();
+    if !is_distributable(&lower) {
+        return Vec::new();
+    }
     let Some(os) = asset_os(&lower) else {
         return Vec::new();
     };
@@ -2030,17 +2033,16 @@ mod tests {
     }
 
     #[test]
-    fn archive_rank_skips_deltas_and_sources() {
-        assert!(super::archive_rank("BeefTV-v2.1.2-linux-amd64.zip").is_some());
+    fn asset_rank_skips_deltas_and_sources() {
+        assert!(super::asset_rank("BeefTV-v2.1.2-linux-amd64.zip").is_some());
         assert!(
-            super::archive_rank("BeefTV-v2.1.2-linux-amd64-from-v2.1.1.delta.zip")
-                .is_none()
+            super::asset_rank("BeefTV-v2.1.2-linux-amd64-from-v2.1.1.delta.zip").is_none()
         );
-        assert!(super::archive_rank(
+        assert!(super::asset_rank(
             "BeefTV-v2.1.2-ffprobe-darwin-amd64-sources.tar.gz"
         )
         .is_none());
-        assert!(super::archive_rank("app-linux-amd64.sha256").is_none());
+        assert!(super::asset_rank("app-linux-amd64.sha256").is_none());
     }
 
     #[test]

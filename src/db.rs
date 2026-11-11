@@ -361,6 +361,24 @@ pub fn get_setting(path: &Path, key: &str) -> rusqlite::Result<Option<String>> {
     }
 }
 
+/// Every setting whose key starts with `prefix`, with the prefix removed.
+/// Lets a caller read a whole group (such as cached update statuses) with one
+/// query instead of one connection per key.
+pub fn settings_with_prefix(path: &Path, prefix: &str) -> rusqlite::Result<Vec<(String, String)>> {
+    let conn = Connection::open(path)?;
+    let mut statement = conn.prepare(
+        "SELECT key, value FROM settings WHERE substr(key, 1, ?1) = ?2 ORDER BY key",
+    )?;
+    let mut rows = statement.query(params![prefix.len() as i64, prefix])?;
+    let mut found = Vec::new();
+    while let Some(row) = rows.next()? {
+        let key: String = row.get(0)?;
+        let value: String = row.get(1)?;
+        found.push((key[prefix.len()..].to_string(), value));
+    }
+    Ok(found)
+}
+
 pub fn upsert_usage_check(
     path: &Path,
     app_id: &str,

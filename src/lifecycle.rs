@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
@@ -27,6 +28,9 @@ pub struct AppSummary {
     pub source_url: Option<String>,
     pub method_id: Option<String>,
     pub method_kind: Option<String>,
+    /// Newest published version when it is newer than the installed one, taken
+    /// from the cached update status so listing stays offline.
+    pub update_available: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -79,6 +83,16 @@ fn list_apps_with(
         .into_iter()
         .map(|app| (app.app_id.clone(), app))
         .collect();
+    // One query for every cached status, so the grid can show an update badge
+    // without a request per application.
+    let latest_versions: HashMap<String, String> = db::settings_with_prefix(db_path, "update:")
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|(app_id, raw)| {
+            let status: crate::update::UpdateStatus = serde_json::from_str(&raw).ok()?;
+            Some((app_id, status.latest_version))
+        })
+        .collect();
 
     Ok(entries
         .into_iter()
@@ -120,6 +134,17 @@ fn list_apps_with(
                 };
             let icon_url = recipe.icon_url(source_url.as_deref());
             let draft = recipe.draft;
+            // Compared against the installed version rather than the cached
+            // `available` flag, so the badge disappears as soon as the upgrade
+            // lands and the recorded version catches up.
+            let update_available = latest_versions
+                .get(&recipe.id)
+                .filter(|latest| {
+                    version.as_deref().is_some_and(|installed| {
+                        crate::update::compare_versions(installed, latest) == Ordering::Less
+                    })
+                })
+                .cloned();
             AppSummary {
                 id: recipe.id,
                 name: recipe.name,
@@ -134,6 +159,7 @@ fn list_apps_with(
                 source_url,
                 method_id,
                 method_kind,
+                update_available,
             }
         })
         .collect())
@@ -548,6 +574,57 @@ mod tests {
         let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].id, "ollama");
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn reports_an_update_only_when_the_cached_version_is_newer() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-update-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        db::init(&path).unwrap();
+        let data_dir = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-update-data-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let jobs = JobManager::new();
+        db::upsert_installed(&path, &record()).unwrap();
+
+        let cache = |latest: &str, available: bool| {
+            let status = crate::update::UpdateStatus {
+                app_id: "ollama".to_string(),
+                installed_version: "1.0.0".to_string(),
+                latest_version: latest.to_string(),
+                available,
+                source: "github-release".to_string(),
+                checked_at: "1".to_string(),
+            };
+            db::set_setting(
+                &path,
+                "update:ollama",
+                &serde_json::to_string(&status).unwrap(),
+            )
+            .unwrap();
+        };
+
+        // No cached check yet.
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
+        assert!(apps[0].update_available.is_none());
+
+        cache("1.2.0", true);
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
+        assert_eq!(apps[0].update_available.as_deref(), Some("1.2.0"));
+
+        // A stale cache entry must not raise a badge once the versions match.
+        cache("1.0.0", true);
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
+        assert!(apps[0].update_available.is_none());
 
         std::fs::remove_dir_all(&data_dir).unwrap();
         std::fs::remove_file(&path).unwrap();

@@ -25,6 +25,8 @@ export type AppSummary = {
   sourceUrl: string | null
   methodId: string | null
   methodKind: string | null
+  /** Newest published version when it is newer than the installed one. */
+  updateAvailable: string | null
 }
 
 export type UsageApi = {
@@ -86,7 +88,10 @@ export type DetectedEntry = {
   evidence: string
 }
 
-export type AppDetail = Omit<AppSummary, 'iconUrl'> & {
+export type AppDetail = Omit<
+  AppSummary,
+  'iconUrl' | 'updateAvailable'
+> & {
   installDir: string | null
   method: string | null
   healthOk: boolean
@@ -162,6 +167,21 @@ export type RecipePreview = {
   warnings: string[]
 }
 
+export type UpdateStatus = {
+  appId: string
+  installedVersion: string
+  latestVersion: string
+  available: boolean
+  source: string
+  checkedAt: string
+}
+
+export type UpdateAvailableEvent = {
+  appId: string
+  installedVersion: string
+  latestVersion: string
+}
+
 export type JobRecord = {
   id: number
   appId: string
@@ -207,12 +227,14 @@ export function planInstall(
   methodId: string | null,
   allowAdvanced: boolean,
   allowElevation: boolean,
+  upgrade = false,
 ): Promise<InstallPlan> {
   return invoke('plan_install', {
     appId,
     methodId,
     allowAdvanced,
     allowElevation,
+    upgrade,
   })
 }
 
@@ -221,12 +243,14 @@ export function installApp(
   methodId: string | null,
   allowAdvanced: boolean,
   allowElevation: boolean,
+  upgrade = false,
 ): Promise<void> {
   return invoke('install_app', {
     appId,
     methodId,
     allowAdvanced,
     allowElevation,
+    upgrade,
     origin: 'ui',
     confirmed: true,
   })
@@ -316,6 +340,26 @@ export function saveMethodSettings(settings: MethodSettings): Promise<void> {
     origin: 'ui',
     confirmed: true,
   })
+}
+
+export function checkUpdates(appId: string): Promise<UpdateStatus> {
+  return invoke('check_updates', { appId })
+}
+
+export function checkAllUpdates(): Promise<UpdateStatus[]> {
+  return invoke('check_all_updates')
+}
+
+export function getUpdateStatus(appId: string): Promise<UpdateStatus | null> {
+  return invoke('get_update_status', { appId })
+}
+
+export function onUpdateAvailable(
+  handler: (event: UpdateAvailableEvent) => void,
+): Promise<UnlistenFn> {
+  return listen<UpdateAvailableEvent>('app-update-available', (event) =>
+    handler(event.payload),
+  )
 }
 
 export function onAppState(

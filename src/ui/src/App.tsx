@@ -25,11 +25,15 @@ function App() {
   const { apps, loading, error, install, start, stop, refresh, dismissError } =
     useApps()
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [planApp, setPlanApp] = useState<AppSummary | null>(null)
+  const [plan, setPlan] = useState<{
+    app: AppSummary
+    upgrade: boolean
+  } | null>(null)
+  const planApp = plan?.app ?? null
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<InstallFilter>('all')
   const closeDetail = useCallback(() => setSelectedId(null), [])
-  const closePlan = useCallback(() => setPlanApp(null), [])
+  const closePlan = useCallback(() => setPlan(null), [])
 
   const visibleApps = useMemo(
     () => apps.filter((app) => matchesFilter(app, filter) && matchesQuery(app, query)),
@@ -39,7 +43,7 @@ function App() {
   function handleAction(app: AppSummary) {
     if (app.draft) return
     if (app.state === 'not_installed') {
-      setPlanApp(app)
+      setPlan({ app, upgrade: false })
     } else if (app.state === 'stopped') {
       void start(app.id)
     } else if (app.state === 'running' && app.managed) {
@@ -50,6 +54,14 @@ function App() {
   function handlePrimaryAction(appId: string) {
     const app = apps.find((item) => item.id === appId)
     if (app) handleAction(app)
+  }
+
+  // Reinstalling through the plan dialog is the upgrade path: the release
+  // method resolves the newest tag, installs it beside the old version, and
+  // switches the active directory.
+  function handleUpgrade(appId: string) {
+    const app = apps.find((item) => item.id === appId)
+    if (app) setPlan({ app, upgrade: true })
   }
 
   return (
@@ -89,11 +101,13 @@ function App() {
           onClose={closeDetail}
           onCatalogChanged={() => void refresh()}
           onPrimaryAction={handlePrimaryAction}
+          onUpgrade={handleUpgrade}
         />
       )}
-      {planApp && (
+      {planApp && plan && (
         <InstallPlanDialog
           app={planApp}
+          upgrade={plan.upgrade}
           onClose={closePlan}
           onInstalled={() => void refresh()}
           install={install}

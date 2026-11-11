@@ -4,11 +4,13 @@ import {
   discoverUsage,
   getAppDetail,
   getJobLog,
+  getUpdateStatus,
   getUsageReport,
   listJobs,
   onAppState,
   onJobFinished,
   onJobLog,
+  onUpdateAvailable,
   openLocalUrl,
   openUrl,
   reinferUsage,
@@ -18,6 +20,7 @@ import {
   type AppDetail as AppDetailData,
   type DetectedEntry,
   type JobRecord,
+  type UpdateStatus,
   type UsageReport,
 } from '../api/apps'
 import { lifecycleLabel, primaryAction } from '../lifecycle'
@@ -55,6 +58,7 @@ type Props = {
   onClose: () => void
   onCatalogChanged: () => void
   onPrimaryAction: (appId: string) => void
+  onUpgrade: (appId: string) => void
 }
 
 export function AppDetail({
@@ -62,6 +66,7 @@ export function AppDetail({
   onClose,
   onCatalogChanged,
   onPrimaryAction,
+  onUpgrade,
 }: Props) {
   const [detail, setDetail] = useState<AppDetailData | null>(null)
   const [jobs, setJobs] = useState<JobRecord[]>([])
@@ -74,18 +79,25 @@ export function AppDetail({
   const [detected, setDetected] = useState<DetectedEntry[]>([])
   const [verifying, setVerifying] = useState(false)
   const [reanalyzing, setReanalyzing] = useState(false)
+  const [update, setUpdate] = useState<UpdateStatus | null>(null)
 
   useEffect(() => {
     let disposed = false
     let unlistenLog: UnlistenFn | undefined
     let unlistenFinished: UnlistenFn | undefined
     let unlistenState: UnlistenFn | undefined
+    let unlistenUpdate: UnlistenFn | undefined
 
     getAppDetail(appId)
       .then((next) => {
         if (disposed) return
         setDetail(next)
         if (next.state !== 'not_installed') {
+          getUpdateStatus(appId)
+            .then((status) => {
+              if (!disposed) setUpdate(status)
+            })
+            .catch(() => {})
           getUsageReport(appId)
             .then((report) => {
               if (!disposed) setUsageReport(report)
@@ -170,6 +182,23 @@ export function AppDetail({
       })
       .catch(() => {})
 
+    onUpdateAvailable((event) => {
+      if (event.appId !== appId) return
+      setUpdate((current) => ({
+        appId: event.appId,
+        installedVersion: event.installedVersion,
+        latestVersion: event.latestVersion,
+        available: true,
+        source: current?.source ?? 'github-release',
+        checkedAt: current?.checkedAt ?? '',
+      }))
+    })
+      .then((fn) => {
+        if (disposed) fn()
+        else unlistenUpdate = fn
+      })
+      .catch(() => {})
+
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
     }
@@ -180,6 +209,7 @@ export function AppDetail({
       unlistenLog?.()
       unlistenFinished?.()
       unlistenState?.()
+      unlistenUpdate?.()
       window.removeEventListener('keydown', handleKeyDown)
     }
   }, [appId, onClose])
@@ -351,6 +381,21 @@ export function AppDetail({
               <span>Version</span>
               <span>{detail.version ?? 'Not installed'}</span>
             </div>
+            {update && (
+              <div className="detail-row">
+                <span>Latest version</span>
+                <span>
+                  {update.latestVersion}
+                  <span
+                    className={`update-badge${
+                      update.available ? '' : ' update-badge--current'
+                    }`}
+                  >
+                    {update.available ? 'Update available' : 'Up to date'}
+                  </span>
+                </span>
+              </div>
+            )}
             <div className="detail-row">
               <span>Install method</span>
               <span>
@@ -404,6 +449,21 @@ export function AppDetail({
               >
                 Configure
               </button>
+              {detail.state !== 'not_installed' && (
+                <button
+                  type="button"
+                  className="popover-button popover-button--primary"
+                  disabled={busy || !update?.available}
+                  title={
+                    update?.available
+                      ? `Update to ${update.latestVersion}`
+                      : 'No update detected yet.'
+                  }
+                  onClick={() => onUpgrade(appId)}
+                >
+                  Update
+                </button>
+              )}
               {detail.sourceUrl && detail.state === 'not_installed' && (
                 <button
                   type="button"

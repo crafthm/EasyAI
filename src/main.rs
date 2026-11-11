@@ -10,6 +10,7 @@ mod methods;
 mod probe;
 mod resolve;
 mod tools;
+mod update;
 mod usage;
 mod usage_infer;
 
@@ -44,9 +45,27 @@ fn main() {
             let handle = app.handle().clone();
             let _ = lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs);
 
+            // Cloned before the state loop takes ownership of the originals.
+            let update_handle = app.handle().clone();
+            let update_db = db_path.clone();
+            let update_data = data_dir.clone();
+
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(5));
                 let _ = lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs);
+            });
+
+            // Version checks talk to GitHub, so they run on their own thread at
+            // most once per `CHECK_INTERVAL_SECS`. The loop itself wakes hourly
+            // and only spends requests when a sweep is actually due.
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_secs(15));
+                loop {
+                    if update::due(&update_db) {
+                        let _ = update::check_all(&update_handle, &update_db, &update_data);
+                    }
+                    std::thread::sleep(Duration::from_secs(3600));
+                }
             });
 
             Ok(())
@@ -74,7 +93,10 @@ fn main() {
             commands::reinfer_usage,
             commands::get_method_settings,
             commands::save_method_settings,
-            commands::list_tools
+            commands::list_tools,
+            commands::check_updates,
+            commands::check_all_updates,
+            commands::get_update_status
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

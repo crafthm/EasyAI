@@ -4,10 +4,12 @@ import {
   installApp,
   listApps,
   onAppState,
+  onUpdateAvailable,
   startApp,
   stopApp,
   type AppStateEvent,
   type AppSummary,
+  type UpdateAvailableEvent,
 } from '../api/apps'
 
 export function useApps() {
@@ -43,9 +45,20 @@ export function useApps() {
     )
   }, [])
 
+  const handleUpdateAvailable = useCallback((event: UpdateAvailableEvent) => {
+    setApps((current) =>
+      current.map((app) =>
+        app.id === event.appId
+          ? { ...app, updateAvailable: event.latestVersion }
+          : app,
+      ),
+    )
+  }, [])
+
   useEffect(() => {
     let disposed = false
     let unlisten: UnlistenFn | undefined
+    let unlistenUpdate: UnlistenFn | undefined
 
     void (async () => {
       try {
@@ -70,11 +83,19 @@ export function useApps() {
         if (!disposed) setError(String(err))
       })
 
+    onUpdateAvailable(handleUpdateAvailable)
+      .then((fn) => {
+        if (disposed) fn()
+        else unlistenUpdate = fn
+      })
+      .catch(() => {})
+
     return () => {
       disposed = true
       unlisten?.()
+      unlistenUpdate?.()
     }
-  }, [handleAppState])
+  }, [handleAppState, handleUpdateAvailable])
 
   const run = useCallback(async (action: () => Promise<void>) => {
     setError(null)
@@ -96,10 +117,11 @@ export function useApps() {
       methodId: string | null,
       allowAdvanced: boolean,
       allowElevation: boolean,
+      upgrade = false,
     ) => {
       setError(null)
       try {
-        await installApp(appId, methodId, allowAdvanced, allowElevation)
+        await installApp(appId, methodId, allowAdvanced, allowElevation, upgrade)
       } catch (err) {
         setError(String(err))
         throw err
