@@ -1456,8 +1456,17 @@ fn imported_path(app_data: &Path, app_id: &str) -> PathBuf {
 }
 
 fn parse_recipe(content: &str) -> Result<Recipe, String> {
+    // A recipe is always a JSON object. Anything else means the server sent a
+    // web page — a GitHub page, a proxy block page — so report that instead of
+    // the parser's line/column noise.
+    if !content.trim_start().starts_with('{') {
+        return Err(
+            "This link returned a web page, not an EasyAI recipe. Use a direct link to the recipe file."
+                .to_string(),
+        );
+    }
     let recipe: Recipe = serde_json::from_str(content)
-        .map_err(|err| format!("The URL does not contain a valid EasyAI recipe: {err}"))?;
+        .map_err(|_| "The recipe file is not valid JSON.".to_string())?;
     recipe.validate()?;
     Ok(recipe)
 }
@@ -3151,6 +3160,27 @@ mod tests {
         );
         remove_recipe(&directory, "demo").unwrap();
         assert!(find(&directory, "demo").is_err());
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn web_page_link_reports_a_readable_error() {
+        let url = serve_recipe(
+            "\n\n<!DOCTYPE html>\n<html><body>Blocked</body></html>".to_string(),
+        );
+        let directory = temp_catalog_dir("web-page-link");
+        let err = preview_recipe(&directory, &url).unwrap_err();
+        assert!(err.contains("returned a web page"), "{err}");
+        assert!(!err.contains("line"), "{err}");
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[test]
+    fn malformed_recipe_reports_a_readable_error() {
+        let url = serve_recipe("{\n  \"id\":\n}".to_string());
+        let directory = temp_catalog_dir("malformed-recipe");
+        let err = preview_recipe(&directory, &url).unwrap_err();
+        assert_eq!(err, "The recipe file is not valid JSON.");
         std::fs::remove_dir_all(&directory).unwrap();
     }
 }

@@ -8,6 +8,7 @@ mod jobs;
 mod lifecycle;
 mod methods;
 mod probe;
+mod proxy;
 mod resolve;
 mod tools;
 mod update;
@@ -57,8 +58,22 @@ pub fn resolve_install_root(db_path: &std::path::Path) -> Result<Option<PathBuf>
 }
 
 fn main() {
+    // Resolve the desktop proxy before any HTTP client or WebKit process exists.
+    proxy::init();
+    if std::env::var_os("EASYAI_DEBUG_PROXY").is_some() {
+        eprintln!(
+            "proxy debug: HTTPS_PROXY={:?} NO_PROXY={:?}",
+            std::env::var("HTTPS_PROXY"),
+            std::env::var("NO_PROXY")
+        );
+    }
     tauri::Builder::default()
         .setup(|app| {
+            #[cfg(target_os = "linux")]
+            if let Some(window) = app.get_webview_window("main") {
+                proxy::disable_webview_proxy(&window);
+            }
+
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
             let db_path = data_dir.join("easyai.db");

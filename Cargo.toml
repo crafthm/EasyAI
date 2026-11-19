@@ -22,5 +22,8 @@ tauri = { version = "2", features = [] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 zstd = "0.13"
 
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_32"] }
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
