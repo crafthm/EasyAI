@@ -369,8 +369,7 @@ export function AppDetail({
             <p className="detail-description">{detail.description}</p>
             {detail.draft && (
               <p className="preview-warning">
-                No install method yet. Imported from a repository without an
-                EasyAI recipe.
+                No install method yet. Imported from a repository.
               </p>
             )}
             <div className="detail-row">

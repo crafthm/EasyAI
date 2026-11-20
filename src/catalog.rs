@@ -24,7 +24,7 @@ pub struct Recipe {
     pub color: String,
     #[serde(default)]
     pub icon: String,
-    /// Imported from a repository that publishes no recipe; metadata only.
+    /// Imported from a repository URL; metadata only.
     #[serde(default)]
     pub draft: bool,
     #[serde(default)]

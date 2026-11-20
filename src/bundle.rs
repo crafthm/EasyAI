@@ -92,6 +92,7 @@ pub fn export(db_path: &Path, app_data: &Path) -> Result<String, String> {
     text.push('\n');
     Ok(text)
 }
+
 pub fn preview(db_path: &Path, app_data: &Path, raw: &str) -> Result<Vec<BundleEntry>, String> {
     let bundle = parse(raw)?;
     analyze(db_path, app_data, &bundle)

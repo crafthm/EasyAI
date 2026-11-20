@@ -50,10 +50,6 @@ export function BundleImportDialog({
   ).length
 
   async function handleInstall() {
-    if (finished) {
-      onClose()
-      return
-    }
     setBusy(true)
     setError(null)
     let current = items
