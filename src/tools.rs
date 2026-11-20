@@ -154,6 +154,24 @@ pub const TOOLS: &[ToolSpec] = &[
         mutating: true,
         inputs: &["app_id", "origin", "confirmed"],
     },
+    ToolSpec {
+        name: "preview_bundle",
+        description: "Validate an easyai.json bundle without importing it.",
+        mutating: false,
+        inputs: &["json"],
+    },
+    ToolSpec {
+        name: "import_bundle",
+        description: "Add the recipes from an easyai.json bundle to the local catalog.",
+        mutating: true,
+        inputs: &["json", "origin", "confirmed"],
+    },
+    ToolSpec {
+        name: "export_bundle",
+        description: "Write the installed applications to an easyai.json bundle.",
+        mutating: true,
+        inputs: &["origin", "confirmed"],
+    },
 ];
 
 pub fn spec(name: &str) -> Option<&'static ToolSpec> {
@@ -189,6 +207,9 @@ mod tests {
             "preview_recipe",
             "import_recipe",
             "remove_recipe",
+            "preview_bundle",
+            "import_bundle",
+            "export_bundle",
             "open_url",
             "open_local_url",
             "get_bom",

@@ -43,3 +43,21 @@ export function CloseIcon() {
     </svg>
   )
 }
+
+export function ImportIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 3v11M8 10l4 4 4-4" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </svg>
+  )
+}
+
+export function ExportIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M12 14V3M8 7l4-4 4 4" />
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+    </svg>
+  )
+}

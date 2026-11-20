@@ -1,5 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import { CloseIcon, GearIcon, PlusIcon, SearchIcon } from './icons'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
+import { exportBundle, previewBundle, type BundleEntry } from '../api/apps'
+import {
+  CloseIcon,
+  ExportIcon,
+  GearIcon,
+  ImportIcon,
+  PlusIcon,
+  SearchIcon,
+} from './icons'
+import { BundleImportDialog } from './BundleImportDialog'
 import { ImportDialog } from './ImportDialog'
 import { SettingsPopover } from './SettingsPopover'
 
@@ -36,15 +45,65 @@ export function Toolbar({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
+  const [bundle, setBundle] = useState<{
+    fileName: string
+    json: string
+    entries: BundleEntry[]
+  } | null>(null)
+  const [actionBusy, setActionBusy] = useState(false)
+  const [notice, setNotice] = useState<{
+    kind: 'info' | 'error'
+    text: string
+  } | null>(null)
   const searchRef = useRef<HTMLInputElement>(null)
+  const fileRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (searchOpen) searchRef.current?.focus()
   }, [searchOpen])
 
+  useEffect(() => {
+    if (!notice) return
+    const timer = window.setTimeout(() => setNotice(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [notice])
+
   function closeSearch() {
     setSearchOpen(false)
     onQueryChange('')
+  }
+
+  async function handleImportFile(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+
+    setActionBusy(true)
+    setNotice(null)
+    try {
+      const json = await file.text()
+      const entries = await previewBundle(json)
+      setBundle({ fileName: file.name, json, entries })
+      setImportOpen(false)
+      setSettingsOpen(false)
+    } catch (err) {
+      setNotice({ kind: 'error', text: String(err) })
+    } finally {
+      setActionBusy(false)
+    }
+  }
+
+  async function handleExport() {
+    setActionBusy(true)
+    setNotice(null)
+    try {
+      const path = await exportBundle()
+      if (path) setNotice({ kind: 'info', text: `Exported to ${path}` })
+    } catch (err) {
+      setNotice({ kind: 'error', text: String(err) })
+    } finally {
+      setActionBusy(false)
+    }
   }
 
   return (
@@ -109,6 +168,37 @@ export function Toolbar({
           <button
             type="button"
             className="icon-button"
+            title="Import easyai.json"
+            aria-label="Import easyai.json"
+            disabled={actionBusy}
+            onClick={() => {
+              setImportOpen(false)
+              setSettingsOpen(false)
+              fileRef.current?.click()
+            }}
+          >
+            <ImportIcon />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            title="Export easyai.json"
+            aria-label="Export easyai.json"
+            disabled={actionBusy}
+            onClick={() => void handleExport()}
+          >
+            <ExportIcon />
+          </button>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".json,application/json"
+            hidden
+            onChange={(event) => void handleImportFile(event)}
+          />
+          <button
+            type="button"
+            className="icon-button"
             title="Import application"
             aria-label="Import application"
             aria-haspopup="dialog"
@@ -148,6 +238,25 @@ export function Toolbar({
           onClose={() => setImportOpen(false)}
           onImported={onImported}
         />
+      )}
+      {bundle && (
+        <BundleImportDialog
+          fileName={bundle.fileName}
+          json={bundle.json}
+          entries={bundle.entries}
+          onClose={() => setBundle(null)}
+          onFinished={onImported}
+        />
+      )}
+      {notice && (
+        <div
+          className={`toolbar-toast${
+            notice.kind === 'error' ? ' toolbar-toast--error' : ''
+          }`}
+          role={notice.kind === 'error' ? 'alert' : 'status'}
+        >
+          {notice.text}
+        </div>
       )}
     </>
   )

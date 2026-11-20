@@ -253,9 +253,10 @@ the boundary that keeps a future assistant on the same deterministic path as the
 #### 4.4.2 Importing application recipes from a URL
 
 The grid is not limited to the bundled catalog. The `+` action accepts a recipe URL, or a GitHub
-repository that publishes `easyai.json` or `.easyai/recipe.json`. Only the recipe file is fetched;
-the repository is never cloned. The app validates the recipe and shows a preview of the source,
-release asset, start command, health check, and uninstall behavior before anything is written.
+repository URL. A repository URL is never cloned and is not probed for a recipe file: the app
+builds a candidate recipe from the latest release and package manifest, then shows a preview of the
+source, release asset, start command, health check, and uninstall behavior before anything is
+written.
 
 An imported recipe is stored in `<app-data>/catalog/imported/<id>.json` together with its source
 URL and sha256, and behaves exactly like a bundled recipe afterwards. Import rules:
@@ -269,7 +270,31 @@ URL and sha256, and behaves exactly like a bundled recipe afterwards. Import rul
 - recipes are never updated automatically, and can be removed from the catalog only while the
   application is not installed.
 
-#### 4.4.3 Usage guidance after startup
+#### 4.4.3 Importing and exporting easyai.json bundles
+
+The toolbar's import and export actions move the installed catalog between machines. Export opens a
+native save dialog and writes `easyai.json`:
+
+```json
+{
+  "version": 1,
+  "apps": [
+    {
+      "recipe": { "id": "ollama", "name": "Ollama", "methods": [] },
+      "source": { "url": "https://github.com/owner/repo", "sha256": "…", "importedAt": "…" },
+      "installed": { "version": "0.5.0", "methodId": "release-linux" }
+    }
+  ]
+}
+```
+
+Import validates every recipe, adds missing recipes to the local catalog, and installs the
+applications that are not already present. Existing recipes are never overwritten, installed
+applications are skipped, and unsupported applications are reported instead of blocking the batch.
+Batch installs run one job at a time through the normal install path, so planning, consent, and
+logging behavior is unchanged.
+
+#### 4.4.4 Usage guidance after startup
 
 A recipe may declare how to use the application after it starts. The detail panel renders this as
 a **Use** section; recipes without usage show no empty panel.

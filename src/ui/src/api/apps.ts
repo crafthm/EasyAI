@@ -167,6 +167,15 @@ export type RecipePreview = {
   warnings: string[]
 }
 
+export type BundleEntry = {
+  id: string
+  name: string
+  version: string | null
+  methodId: string | null
+  status: 'install' | 'installed' | 'unsupported'
+  message: string | null
+}
+
 export type UpdateStatus = {
   appId: string
   installedVersion: string
@@ -295,6 +304,18 @@ export function removeRecipe(appId: string): Promise<void> {
     origin: 'ui',
     confirmed: true,
   })
+}
+
+export function previewBundle(json: string): Promise<BundleEntry[]> {
+  return invoke('preview_bundle', { json })
+}
+
+export function importBundle(json: string): Promise<BundleEntry[]> {
+  return invoke('import_bundle', { json, origin: 'ui', confirmed: true })
+}
+
+export function exportBundle(): Promise<string | null> {
+  return invoke('export_bundle', { origin: 'ui', confirmed: true })
 }
 
 export function openUrl(appId: string, url: string): Promise<void> {

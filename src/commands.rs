@@ -3,7 +3,9 @@ use std::process::Command;
 use std::sync::Arc;
 
 use tauri::{AppHandle, State};
+use tauri_plugin_dialog::DialogExt;
 
+use crate::bundle::BundleEntry;
 use crate::catalog::{self, Method, Recipe, RecipePreview};
 use crate::db::{self, JobRecord};
 use crate::jobs::{self, JobLogger, Phase};
@@ -462,6 +464,73 @@ pub async fn remove_recipe(
     })
     .await
     .map_err(|err| format!("Failed to remove the recipe: {err}"))?
+}
+
+#[tauri::command]
+pub async fn preview_bundle(
+    state: State<'_, AppState>,
+    json: String,
+) -> Result<Vec<BundleEntry>, String> {
+    let app_data = state.app_data_dir.clone();
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::bundle::preview(&db_path, &app_data, &json)
+    })
+    .await
+    .map_err(|err| format!("Failed to read the bundle: {err}"))?
+}
+
+#[tauri::command]
+pub async fn import_bundle(
+    state: State<'_, AppState>,
+    json: String,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<Vec<BundleEntry>, String> {
+    authorize("import_bundle", origin, confirmed)?;
+    let app_data = state.app_data_dir.clone();
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::bundle::import(&db_path, &app_data, &json)
+    })
+    .await
+    .map_err(|err| format!("Failed to import the bundle: {err}"))?
+}
+
+#[tauri::command]
+pub async fn export_bundle(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<Option<String>, String> {
+    authorize("export_bundle", origin, confirmed)?;
+    let app_data = state.app_data_dir.clone();
+    let db_path = state.db_path.clone();
+    let json = tauri::async_runtime::spawn_blocking(move || {
+        crate::bundle::export(&db_path, &app_data)
+    })
+    .await
+    .map_err(|err| format!("Failed to build the bundle: {err}"))??;
+
+    let chosen = tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .set_file_name("easyai.json")
+            .add_filter("JSON", &["json"])
+            .blocking_save_file()
+    })
+    .await
+    .map_err(|err| format!("Failed to open the save dialog: {err}"))?;
+    let Some(file) = chosen else {
+        return Ok(None);
+    };
+    let path = file
+        .into_path()
+        .map_err(|err| format!("Failed to resolve the export path: {err}"))?;
+    std::fs::write(&path, json)
+        .map_err(|err| format!("Failed to write {}: {err}", path.display()))?;
+    Ok(Some(path.display().to_string()))
 }
 
 #[tauri::command]

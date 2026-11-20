@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bundle;
 mod catalog;
 mod commands;
 mod db;
@@ -68,6 +69,7 @@ fn main() {
         );
     }
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(target_os = "linux")]
             if let Some(window) = app.get_webview_window("main") {
@@ -145,6 +147,9 @@ fn main() {
             commands::preview_recipe,
             commands::import_recipe,
             commands::remove_recipe,
+            commands::preview_bundle,
+            commands::import_bundle,
+            commands::export_bundle,
             commands::get_bom,
             commands::open_url,
             commands::open_local_url,

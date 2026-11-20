@@ -1260,7 +1260,7 @@ fn preview_draft(
     let (recipe, candidate_warnings, analysis) =
         candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
     let mut warnings = vec![
-        "This repository publishes no EasyAI recipe. A candidate recipe was generated from its latest release."
+        "No EasyAI recipe was provided. A candidate recipe was generated from the latest release."
             .to_string(),
     ];
     warnings.extend(candidate_warnings);
@@ -1425,7 +1425,7 @@ pub fn remove_recipe(app_data: &Path, app_id: &str) -> Result<(), String> {
         .map_err(|err| format!("Failed to remove the imported recipe: {err}"))
 }
 
-fn store_imported(
+pub(crate) fn store_imported(
     app_data: &Path,
     recipe: &Recipe,
     source: &RecipeSource,
@@ -1472,22 +1472,13 @@ fn parse_recipe(content: &str) -> Result<Recipe, String> {
 }
 
 /// Returns the recipe at this URL. `None` means the input is a GitHub
-/// repository that publishes no recipe; the caller may import a draft instead.
+/// repository; the caller generates a candidate recipe from it instead.
 fn try_fetch_recipe(input: &str) -> Result<Option<(String, String)>, String> {
     let url = reqwest::Url::parse(input.trim())
         .map_err(|_| "Enter a valid recipe or GitHub repository URL.".to_string())?;
     ensure_allowed_scheme(&url)?;
 
-    if let Some((owner, repo)) = github_repo_parts(&url) {
-        let candidates = [
-            format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/easyai.json"),
-            format!("https://raw.githubusercontent.com/{owner}/{repo}/HEAD/.easyai/recipe.json"),
-        ];
-        for candidate in candidates {
-            if let Some(content) = http_get_optional(&candidate)? {
-                return Ok(Some((candidate, content)));
-            }
-        }
+    if github_repo_parts(&url).is_some() {
         return Ok(None);
     }
 
@@ -2022,7 +2013,7 @@ fn draft_bytes(recipe: &Recipe) -> Result<Vec<u8>, String> {
     serde_json::to_vec(recipe).map_err(|err| format!("Failed to prepare the draft: {err}"))
 }
 
-fn imported_at() -> String {
+pub(crate) fn imported_at() -> String {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().to_string())
@@ -2135,7 +2126,7 @@ fn http_get_optional(url: &str) -> Result<Option<String>, String> {
     Ok(Some(content))
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }

@@ -1126,6 +1126,78 @@ body {
   margin-top: 18px;
 }
 
+/* Batch import easyai.json */
+.bundle-list {
+  margin: 14px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border);
+  list-style: none;
+}
+
+.bundle-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.bundle-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.bundle-item-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.bundle-item-meta {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  opacity: 0.65;
+  word-break: break-word;
+}
+
+.bundle-item-status {
+  flex: none;
+  max-width: 52%;
+  color: inherit;
+  font-size: 12px;
+  opacity: 0.7;
+  text-align: right;
+  word-break: break-word;
+}
+
+.bundle-item-status--failed {
+  color: #e5484d;
+  opacity: 1;
+}
+
+.toolbar-toast {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 60;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+  font-size: 12px;
+  word-break: break-word;
+  user-select: text;
+}
+
+.toolbar-toast--error {
+  border-color: rgba(229, 72, 77, 0.45);
+  color: #e5484d;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .icon-button,
   .app-tile-art {
