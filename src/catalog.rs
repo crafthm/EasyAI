@@ -1,16 +1,14 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 const BUNDLED_RECIPES: &[&str] = &[include_str!("../catalog/ollama.json")];
 const IMPORT_SUBDIR: &str = "catalog/imported";
-const MAX_RECIPE_BYTES: u64 = 512 * 1024;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Recipe {
@@ -602,20 +600,20 @@ impl Availability {
         if recipe.methods.is_empty() {
             let hint = if !detected.is_empty() {
                 format!(
-                    "This repository publishes installers for {} but none of them can be installed automatically. It is probably not a runnable application.",
+                    "This project only publishes installers for {} and EasyAI can't install those automatically. It's probably not a runnable app; if you still need it, install it manually.",
                     summarize_platforms(&detected)
                 )
             } else if analysis.installer_only {
-                "The latest release only ships native installers, which this version cannot install automatically."
+                "The latest release only offers installer files (such as .deb, .rpm, .AppImage, .dmg or .exe), which EasyAI can't run automatically. Install the app manually, or add an install method to the recipe."
                     .to_string()
             } else if analysis.assets_present {
                 // A release exists but nothing in it is runnable: data files,
                 // checksums, catalogs. Saying "probably a library" here is
                 // wrong and sends people looking for the wrong problem.
-                "The latest release contains no runnable binaries, only data files. No install method could be inferred."
+                "The latest release contains no runnable binaries, only data files, so EasyAI couldn't work out an install method. Check the release assets or add one to the recipe."
                     .to_string()
             } else {
-                "No installable artifact was found. This repository is probably a library, a plugin, or not a runnable application."
+                "No installable file was found. This repository is probably a library, a plugin, or not a runnable application. If it is an app, add an install method to the recipe."
                     .to_string()
             };
             return Ok(Self {
@@ -626,10 +624,10 @@ impl Availability {
             });
         }
         let hint = if detected.is_empty() {
-            format!("No install method targets {platform}.")
+            format!("The recipe has no install method for {platform}. Add one for this platform before installing.")
         } else {
             format!(
-                "This application only supports {}, not {platform}.",
+                "This app only supports {}, not {platform}. Install it on a supported system, or add a method for this platform.",
                 summarize_platforms(&detected)
             )
         };
@@ -1203,38 +1201,7 @@ pub fn find(app_data: &Path, app_id: &str) -> Result<CatalogEntry, String> {
 
 pub fn preview_recipe(app_data: &Path, input: &str) -> Result<RecipePreview, String> {
     let platform = crate::probe::current_platform_id()?;
-    let Some((source_url, content)) = try_fetch_recipe(input)? else {
-        return preview_draft(app_data, input, &platform);
-    };
-    let sha256 = sha256_hex(content.as_bytes());
-    let recipe = parse_recipe(&content)?;
-    let availability = Availability::describe(&recipe, &platform, &DraftAnalysis::default())?;
-    let conflict = entries(app_data)?
-        .iter()
-        .any(|entry| entry.recipe.id == recipe.id);
-
-    let mut warnings = vec![
-        "Release archives are not checksum-verified by this version.".to_string(),
-    ];
-    if conflict {
-        warnings.push(format!(
-            "An application with id '{}' already exists.",
-            recipe.id
-        ));
-    }
-
-    Ok(RecipePreview {
-        recipe,
-        source_url,
-        sha256,
-        platform,
-        supported: availability.supported,
-        detected_platforms: availability.detected_platforms,
-        unusable: availability.unusable,
-        hint: availability.hint,
-        conflict,
-        warnings,
-    })
+    preview_draft(app_data, input, &platform)
 }
 
 fn preview_draft(
@@ -1257,15 +1224,12 @@ fn preview_draft(
             platform,
         )
     });
-    let (recipe, candidate_warnings, analysis) =
+    let (recipe, mut warnings, analysis) =
         candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
-    let mut warnings = vec![
-        "No EasyAI recipe was provided. A candidate recipe was generated from the latest release."
-            .to_string(),
-    ];
-    warnings.extend(candidate_warnings);
     if let Some(err) = release_error {
-        warnings.push(format!("Could not read the latest release: {err}"));
+        warnings.push(format!(
+            "Couldn't check the latest release on GitHub, so the preview may be missing version or download details. Try again later. ({err})"
+        ));
     }
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     let conflict = entries(app_data)?
@@ -1274,7 +1238,7 @@ fn preview_draft(
     let availability = Availability::describe(&recipe, platform, &analysis)?;
     if conflict {
         warnings.push(format!(
-            "An application with id '{}' already exists.",
+            "This app is already in your catalog with the ID '{}', so it can't be added again. If you imported it before, remove that copy first; built-in apps can't be removed.",
             recipe.id
         ));
     }
@@ -1313,6 +1277,9 @@ fn import_draft(
     });
     let (recipe, _, analysis) =
         candidate_recipe(&owner, &repo, release.as_ref(), inference.as_ref());
+    // Storing an invalid recipe would make it invisible: `entries` skips any
+    // stored recipe that fails validation.
+    recipe.validate()?;
     let sha256 = sha256_hex(&draft_bytes(&recipe)?);
     if sha256 != expected_sha256 {
         return Err(
@@ -1324,7 +1291,7 @@ fn import_draft(
         .any(|entry| entry.recipe.id == recipe.id)
     {
         return Err(format!(
-            "An application with id '{}' already exists.",
+            "This app is already in your catalog with the ID '{}'. Remove the existing imported copy before importing it again.",
             recipe.id
         ));
     }
@@ -1355,38 +1322,7 @@ pub fn import_recipe(
     if expected_sha256.trim().is_empty() {
         return Err("The recipe preview is missing its checksum. Preview it again.".to_string());
     }
-    let Some((source_url, content)) = try_fetch_recipe(input)? else {
-        return import_draft(app_data, input, expected_sha256);
-    };
-    let sha256 = sha256_hex(content.as_bytes());
-    if sha256 != expected_sha256 {
-        return Err("The recipe changed since it was previewed. Preview it again.".to_string());
-    }
-    let recipe = parse_recipe(&content)?;
-    let platform = crate::probe::current_platform_id()?;
-    recipe.validate_for_import(&platform)?;
-
-    if entries(app_data)?
-        .iter()
-        .any(|entry| entry.recipe.id == recipe.id)
-    {
-        return Err(format!(
-            "An application with id '{}' already exists.",
-            recipe.id
-        ));
-    }
-
-    let imported_at = imported_at();
-    let source = RecipeSource {
-        url: source_url,
-        sha256,
-        imported_at,
-    };
-    store_imported(app_data, &recipe, &source)?;
-    Ok(CatalogEntry {
-        recipe,
-        source: Some(source),
-    })
+    import_draft(app_data, input, expected_sha256)
 }
 
 pub fn update_imported_recipe(
@@ -1412,6 +1348,11 @@ pub fn update_imported_recipe(
 pub fn parse_github_repo_url(input: &str) -> Option<(String, String)> {
     let url = reqwest::Url::parse(input).ok()?;
     github_repo_parts(&url)
+}
+
+/// Whether the recipe for this application was imported rather than bundled.
+pub fn is_imported(app_data: &Path, app_id: &str) -> bool {
+    imported_path(app_data, app_id).exists()
 }
 
 pub fn remove_recipe(app_data: &Path, app_id: &str) -> Result<(), String> {
@@ -1453,37 +1394,6 @@ fn imported_dir(app_data: &Path) -> PathBuf {
 
 fn imported_path(app_data: &Path, app_id: &str) -> PathBuf {
     imported_dir(app_data).join(format!("{app_id}.json"))
-}
-
-fn parse_recipe(content: &str) -> Result<Recipe, String> {
-    // A recipe is always a JSON object. Anything else means the server sent a
-    // web page — a GitHub page, a proxy block page — so report that instead of
-    // the parser's line/column noise.
-    if !content.trim_start().starts_with('{') {
-        return Err(
-            "This link returned a web page, not an EasyAI recipe. Use a direct link to the recipe file."
-                .to_string(),
-        );
-    }
-    let recipe: Recipe = serde_json::from_str(content)
-        .map_err(|_| "The recipe file is not valid JSON.".to_string())?;
-    recipe.validate()?;
-    Ok(recipe)
-}
-
-/// Returns the recipe at this URL. `None` means the input is a GitHub
-/// repository; the caller generates a candidate recipe from it instead.
-fn try_fetch_recipe(input: &str) -> Result<Option<(String, String)>, String> {
-    let url = reqwest::Url::parse(input.trim())
-        .map_err(|_| "Enter a valid recipe or GitHub repository URL.".to_string())?;
-    ensure_allowed_scheme(&url)?;
-
-    if github_repo_parts(&url).is_some() {
-        return Ok(None);
-    }
-
-    let content = http_get(url.as_str())?;
-    Ok(Some((url.to_string(), content)))
 }
 
 /// A repository that distributes itself as an npm package.
@@ -1695,43 +1605,39 @@ fn candidate_recipe(
     }
     if methods.is_empty() {
         warnings.push(
-            "No usable release archive was found. The app will be added as a draft without an install method."
+            "This project's latest release has no downloadable archive that EasyAI can install. It will be added without an install method, so you'll need to add one before it can be installed."
                 .to_string(),
         );
         if installer_only {
             warnings.push(
-                "The latest release only ships native installers, which this version cannot install automatically."
+                "The latest release only offers installer files (such as .deb, .rpm, .AppImage, .dmg or .exe), which EasyAI can't run automatically. Install the app manually, or add an install method to the recipe."
                     .to_string(),
             );
         }
     } else if release_count == 0 {
         let package = npm.as_ref().expect("npm method implies a probe result");
         warnings.push(format!(
-            "The GitHub release ships no runnable binary. An npm install method was inferred from {} (package '{}'). Review it before installing.",
+            "The release has no installable archive, so EasyAI guessed an npm install from {} (package '{}'). Check the install method before adding it.",
             package.manifest, package.name
         ));
         if let Some(version) = &package.version {
             warnings.push(format!(
-                "The manifest declares version {version}; the installed version is read from the registry."
+                "The recipe's version is {version} from {}, while the installed version is read from the npm registry, so the two may differ.",
+                package.manifest
             ));
         }
-    } else {
-        warnings.push(
-            "Install method inferred from the latest GitHub Release. Review it before installing."
-                .to_string(),
-        );
     }
     if release_count > 0
         && inference.and_then(|inference| inference.launch.as_ref()).is_none()
     {
         warnings.push(
-            "No start command was inferred. Start/Stop will not work until the recipe is edited."
+            "EasyAI couldn't work out how to start this app. You can still install it, but Start/Stop won't work until you add a start command to the recipe."
                 .to_string(),
         );
     }
     if let Some(node) = npm.as_ref().and_then(|package| package.node.as_deref()) {
         warnings.push(format!(
-            "This package requires Node {node}. Install will fail if the local Node is older."
+            "This npm package needs Node {node} or newer. Install or upgrade Node first, otherwise installation will fail."
         ));
     }
 
@@ -1739,7 +1645,6 @@ fn candidate_recipe(
         website: Some(homepage.clone()),
         ..Default::default()
     });
-    let category = inference.and_then(|inference| inference.category);
     if let Some(inference) = inference {
         if inference.launch.is_some()
             || !inference.cli.is_empty()
@@ -1756,6 +1661,16 @@ fn candidate_recipe(
         }
         warnings.extend(inference.warnings.clone());
     }
+    // A category the generated usage cannot satisfy fails recipe validation,
+    // which makes the stored entry silently disappear from the catalog. Only
+    // keep the inferred category when the usage actually backs it up.
+    let category = inference
+        .and_then(|inference| inference.category)
+        .filter(|category| {
+            usage
+                .as_ref()
+                .is_some_and(|usage| category_satisfied(*category, usage))
+        });
 
     let recipe = Recipe {
         id: draft_id(owner, &repo.name),
@@ -2020,23 +1935,6 @@ pub(crate) fn imported_at() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
-fn ensure_allowed_scheme(url: &reqwest::Url) -> Result<(), String> {
-    match url.scheme() {
-        "https" => Ok(()),
-        "http" if is_loopback(url) => Ok(()),
-        _ => Err(
-            "Recipe URLs must use https:// (http:// is allowed only for localhost).".to_string(),
-        ),
-    }
-}
-
-fn is_loopback(url: &reqwest::Url) -> bool {
-    matches!(
-        url.host_str(),
-        Some("localhost") | Some("127.0.0.1") | Some("::1")
-    )
-}
-
 fn github_repo_parts(url: &reqwest::Url) -> Option<(String, String)> {
     if url.scheme() != "https" || url.host_str() != Some("github.com") {
         return None;
@@ -2083,49 +1981,6 @@ fn is_valid_github_name(name: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
 }
 
-fn http_get(url: &str) -> Result<String, String> {
-    http_get_optional(url)?.ok_or_else(|| "Recipe not found (404).".to_string())
-}
-
-fn http_get_optional(url: &str) -> Result<Option<String>, String> {
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("EasyAI/0.1")
-        .timeout(Duration::from_secs(20))
-        .redirect(reqwest::redirect::Policy::limited(5))
-        .build()
-        .map_err(|err| format!("Failed to create HTTP client: {err}"))?;
-    let response = client
-        .get(url)
-        .send()
-        .map_err(|err| format!("Could not fetch the recipe: {err}"))?;
-    let status = response.status();
-    if status.as_u16() == 404 {
-        return Ok(None);
-    }
-    if !status.is_success() {
-        return Err(match status.as_u16() {
-            403 => "The recipe server denied access (403).".to_string(),
-            _ => format!("The recipe server returned {status}."),
-        });
-    }
-    if let Some(length) = response.content_length() {
-        if length > MAX_RECIPE_BYTES {
-            return Err("The recipe is too large.".to_string());
-        }
-    }
-    let mut buffer = Vec::new();
-    response
-        .take(MAX_RECIPE_BYTES + 1)
-        .read_to_end(&mut buffer)
-        .map_err(|err| format!("Failed to read the recipe: {err}"))?;
-    if buffer.len() as u64 > MAX_RECIPE_BYTES {
-        return Err("The recipe is too large.".to_string());
-    }
-    let content = String::from_utf8(buffer)
-        .map_err(|_| "The recipe is not valid UTF-8.".to_string())?;
-    Ok(Some(content))
-}
-
 pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -2133,15 +1988,11 @@ pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{Read, Write};
-    use std::net::TcpListener;
-    use std::thread;
-
     use serde_json::{json, Value};
 
     use super::{
-        entries, find, github_repo_parts, import_recipe, preview_recipe, remove_recipe,
-        sha256_hex, store_imported, MethodKind, Recipe, RecipeSource,
+        entries, find, github_repo_parts, remove_recipe, sha256_hex, store_imported, MethodKind,
+        Recipe, RecipeSource,
     };
 
     fn base_recipe() -> Value {
@@ -2502,7 +2353,7 @@ mod tests {
         );
         assert!(analysis.installer_only);
         assert!(recipe.validate().is_ok());
-        assert!(warnings.iter().any(|warning| warning.contains("No start command")));
+        assert!(warnings.iter().any(|warning| warning.contains("start this app")));
     }
 
     #[test]
@@ -2797,7 +2648,48 @@ mod tests {
         );
         assert_eq!(usage.cli.len(), 1);
         assert_eq!(usage.cli[0].label, "CLI help");
-        assert!(!warnings.iter().any(|warning| warning.contains("No start command")));
+        assert!(!warnings.iter().any(|warning| warning.contains("start this app")));
+    }
+
+    #[test]
+    fn candidate_recipe_drops_a_category_its_usage_cannot_satisfy() {
+        let repo = crate::github::RepoSummary {
+            name: "multica".to_string(),
+            html_url: "https://github.com/multica-ai/multica".to_string(),
+            description: Some("Make humans and AI agents work as one team.".to_string()),
+            homepage: Some("https://multica.ai".to_string()),
+            logo: None,
+            default_branch: "main".to_string(),
+        };
+        let release = crate::github::ReleaseInfo {
+            tag_name: "v0.11.1".to_string(),
+            assets: vec![crate::github::ReleaseAsset {
+                name: "multica-cli-0.11.1-linux-amd64.tar.gz".to_string(),
+                size: 10,
+            }],
+        };
+        // The launch executable was found, so the inferrer calls this a CLI
+        // tool, but it found no `cli/` entry to advertise as CLI usage.
+        let inference = crate::usage_infer::Inference {
+            category: Some(super::Category::CliTool),
+            launch: Some(super::LaunchUsage {
+                command: "{install_dir}/multica".to_string(),
+                source: Some("artifact".to_string()),
+                confidence: Some("high".to_string()),
+            }),
+            cli: Vec::new(),
+            warnings: Vec::new(),
+            source: "artifact".to_string(),
+            confidence: "high".to_string(),
+        };
+        let (recipe, _, _) = super::candidate_recipe(
+            "multica-ai",
+            &repo,
+            Some(&release),
+            Some(&inference),
+        );
+        assert_eq!(recipe.category, None);
+        recipe.validate().unwrap();
     }
 
     #[test]
@@ -3035,49 +2927,6 @@ mod tests {
         assert_eq!(github_repo_parts(&url), None);
     }
 
-    fn serve_recipe(body: String) -> String {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        thread::spawn(move || {
-            for stream in listener.incoming().take(3) {
-                let mut stream = stream.unwrap();
-                let mut buffer = [0u8; 2048];
-                let _ = stream.read(&mut buffer);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                    body.len(),
-                    body
-                );
-                let _ = stream.write_all(response.as_bytes());
-            }
-        });
-        format!("http://{address}/easyai.json")
-    }
-
-    fn remote_recipe(platform: &str) -> Value {
-        let (os, arch) = super::split_platform(platform).unwrap();
-        json!({
-            "id": "remote-demo",
-            "name": "Remote demo",
-            "platforms": [platform],
-            "methods": [{
-                "id": "release",
-                "kind": "release",
-                "when": { "os": [os], "arch": [arch] },
-                "source": {
-                    "repo": "owner/repo",
-                    "asset": { platform: "demo.tar.gz" }
-                },
-                "version": { "type": "github-release", "repo": "owner/repo" },
-                "service": {
-                    "command": ["{install_dir}/bin/demo", "serve"],
-                    "health_url": "http://127.0.0.1:9999/health"
-                },
-                "uninstall": { "keep_paths": [] }
-            }]
-        })
-    }
-
     fn temp_catalog_dir(label: &str) -> std::path::PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "easyai-catalog-{label}-{}",
@@ -3086,51 +2935,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         directory
-    }
-
-    #[test]
-    fn previews_and_imports_from_a_recipe_url() {
-        let platform = crate::probe::current_platform_id().unwrap();
-        let url = serve_recipe(remote_recipe(&platform).to_string());
-        let directory = temp_catalog_dir("import-url");
-
-        let preview = preview_recipe(&directory, &url).unwrap();
-        assert!(preview.supported);
-        assert!(!preview.conflict);
-        assert_eq!(preview.recipe.id, "remote-demo");
-
-        let entry = import_recipe(&directory, &url, &preview.sha256).unwrap();
-        assert_eq!(entry.recipe.id, "remote-demo");
-        let found = find(&directory, "remote-demo").unwrap();
-        assert_eq!(found.source.as_ref().unwrap().url, url);
-
-        remove_recipe(&directory, "remote-demo").unwrap();
-        assert!(find(&directory, "remote-demo").is_err());
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
-    fn import_rejects_a_changed_recipe() {
-        let platform = crate::probe::current_platform_id().unwrap();
-        let url = serve_recipe(remote_recipe(&platform).to_string());
-        let directory = temp_catalog_dir("import-changed");
-        let err = import_recipe(&directory, &url, "deadbeef").unwrap_err();
-        assert!(err.contains("changed"), "{err}");
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
-    fn preview_reports_bundled_conflict() {
-        let platform = crate::probe::current_platform_id().unwrap();
-        let mut value = remote_recipe(&platform);
-        value["id"] = json!("ollama");
-        let url = serve_recipe(value.to_string());
-        let directory = temp_catalog_dir("import-conflict");
-        let preview = preview_recipe(&directory, &url).unwrap();
-        assert!(preview.conflict);
-        let err = import_recipe(&directory, &url, &preview.sha256).unwrap_err();
-        assert!(err.contains("already exists"), "{err}");
-        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
@@ -3154,24 +2958,4 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
-    #[test]
-    fn web_page_link_reports_a_readable_error() {
-        let url = serve_recipe(
-            "\n\n<!DOCTYPE html>\n<html><body>Blocked</body></html>".to_string(),
-        );
-        let directory = temp_catalog_dir("web-page-link");
-        let err = preview_recipe(&directory, &url).unwrap_err();
-        assert!(err.contains("returned a web page"), "{err}");
-        assert!(!err.contains("line"), "{err}");
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
-    fn malformed_recipe_reports_a_readable_error() {
-        let url = serve_recipe("{\n  \"id\":\n}".to_string());
-        let directory = temp_catalog_dir("malformed-recipe");
-        let err = preview_recipe(&directory, &url).unwrap_err();
-        assert_eq!(err, "The recipe file is not valid JSON.");
-        std::fs::remove_dir_all(&directory).unwrap();
-    }
 }

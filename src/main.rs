@@ -6,7 +6,9 @@ mod commands;
 mod db;
 mod github;
 mod jobs;
+mod lanscan;
 mod lifecycle;
+mod logging;
 mod methods;
 mod probe;
 mod proxy;
@@ -58,6 +60,26 @@ pub fn resolve_install_root(db_path: &std::path::Path) -> Result<Option<PathBuf>
     Ok(Some(path))
 }
 
+/// Number of job records (and their log files) kept across all applications.
+const KEEP_JOBS: usize = 200;
+
+/// Drops the oldest job records and the log files they point at.
+fn prune_job_logs(db_path: &std::path::Path) {
+    match db::prune_jobs(db_path, KEEP_JOBS) {
+        Ok(paths) => {
+            for path in &paths {
+                if !path.is_empty() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+            if !paths.is_empty() {
+                log::info!("Pruned {} old job log(s).", paths.len());
+            }
+        }
+        Err(err) => log::warn!("Failed to prune old job logs: {err}"),
+    }
+}
+
 fn main() {
     // Resolve the desktop proxy before any HTTP client or WebKit process exists.
     proxy::init();
@@ -78,22 +100,30 @@ fn main() {
 
             let data_dir = app.path().app_data_dir()?;
             std::fs::create_dir_all(&data_dir)?;
+            if let Err(err) = logging::init(&probe::logs_dir(&data_dir)) {
+                eprintln!("Failed to initialize logging: {err}");
+            }
+            log::info!("EasyAI starting (data dir: {})", data_dir.display());
             let db_path = data_dir.join("easyai.db");
-            db::init(&db_path)?;
+            if let Err(err) = db::init(&db_path) {
+                log::error!("Failed to open {}: {err}", db_path.display());
+                return Err(err.into());
+            }
             db::mark_running_jobs_failed(&db_path, "Interrupted by application exit.")?;
+            prune_job_logs(&db_path);
 
             // A bad path must not stop the app from starting: fall back to the
             // default root and let the settings tab surface the problem.
             let install_root = match resolve_install_root(&db_path) {
                 Ok(root) => root,
                 Err(err) => {
-                    eprintln!("{err} Falling back to the default install root.");
+                    log::warn!("{err} Falling back to the default install root.");
                     None
                 }
             };
             if let Some(root) = &install_root {
                 if let Err(err) = std::fs::create_dir_all(root) {
-                    eprintln!("Failed to create {}: {err}", root.display());
+                    log::warn!("Failed to create {}: {err}", root.display());
                 }
             }
 
@@ -106,7 +136,9 @@ fn main() {
             });
 
             let handle = app.handle().clone();
-            let _ = lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs);
+            if let Err(err) = lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs) {
+                log::warn!("Initial state refresh failed: {err}");
+            }
 
             // Cloned before the state loop takes ownership of the originals.
             let update_handle = app.handle().clone();
@@ -115,7 +147,11 @@ fn main() {
 
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(5));
-                let _ = lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs);
+                if let Err(err) =
+                    lifecycle::refresh_states(&handle, &db_path, &data_dir, &jobs)
+                {
+                    log::warn!("State refresh failed: {err}");
+                }
             });
 
             // Version checks talk to GitHub, so they run on their own thread at
@@ -125,7 +161,7 @@ fn main() {
                 std::thread::sleep(Duration::from_secs(15));
                 loop {
                     if update::due(&update_db) {
-                        let _ = update::check_all(&update_handle, &update_db, &update_data);
+                        update::check_all(&update_handle, &update_db, &update_data);
                     }
                     std::thread::sleep(Duration::from_secs(3600));
                 }
@@ -146,7 +182,8 @@ fn main() {
             commands::get_job_log,
             commands::preview_recipe,
             commands::import_recipe,
-            commands::remove_recipe,
+            commands::remove_app,
+            commands::save_start_command,
             commands::preview_bundle,
             commands::import_bundle,
             commands::export_bundle,
@@ -164,7 +201,9 @@ fn main() {
             commands::list_tools,
             commands::check_updates,
             commands::check_all_updates,
-            commands::get_update_status
+            commands::get_update_status,
+            commands::scan_lan,
+            commands::log_ui_error
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

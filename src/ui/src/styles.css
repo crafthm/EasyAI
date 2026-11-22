@@ -770,6 +770,96 @@ body {
   color: #e5484d;
 }
 
+/* 局域网扫描对话框 */
+.scan-dialog {
+  width: min(860px, 100%);
+}
+
+.scan-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.4fr) 72px;
+  gap: 8px;
+  margin: 14px 0 10px;
+}
+
+.scan-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+}
+
+.scan-field > span {
+  opacity: 0.65;
+}
+
+.scan-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.scan-note {
+  margin: 0;
+  max-width: 560px;
+  font-size: 11px;
+  opacity: 0.6;
+}
+
+.scan-summary {
+  margin: 10px 0 0;
+  font-size: 13px;
+}
+
+.scan-empty {
+  margin: 10px 0 0;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+.scan-table-wrap {
+  margin-top: 10px;
+  overflow-x: auto;
+}
+
+.scan-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.scan-table th,
+.scan-table td {
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+
+.scan-table th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+
+.scan-table tbody tr:hover {
+  background: var(--hover);
+}
+
+.scan-muted {
+  opacity: 0.5;
+  cursor: help;
+}
+
+.scan-hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
+}
+
 /* 设置弹窗 */
 .settings-popover {
   width: 640px;

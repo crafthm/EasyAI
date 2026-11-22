@@ -3,11 +3,12 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use crate::db;
+use crate::{db, logging};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
@@ -158,6 +159,7 @@ pub struct JobLogger {
     db_path: PathBuf,
     app: AppHandle,
     file: LogFile,
+    started: Instant,
 }
 
 impl JobLogger {
@@ -186,14 +188,22 @@ impl JobLogger {
             db_path: db_path.to_path_buf(),
             app: app.clone(),
             file: LogFile::create(&log_path)?,
+            started: Instant::now(),
         };
-        logger.log(format!("[{kind}] started (origin: {origin})"));
+        logger.log(format!(
+            "[{kind}] started (origin: {origin}, method: {})",
+            method_id.unwrap_or("-")
+        ));
         Ok(logger)
     }
 
     pub fn log(&mut self, line: impl AsRef<str>) {
-        let line = line.as_ref();
-        if let Err(err) = self.file.write_line(line) {
+        let line = format!(
+            "[{}] {}",
+            logging::timestamp(),
+            logging::redact(line.as_ref())
+        );
+        if let Err(err) = self.file.write_line(&line) {
             let _ = self.file.write_line(&format!("(failed to write log: {err})"));
         }
         let _ = self.app.emit(
@@ -201,19 +211,20 @@ impl JobLogger {
             JobLogEvent {
                 job_id: self.job_id,
                 app_id: self.app_id.clone(),
-                line: line.to_string(),
+                line,
             },
         );
     }
 
     pub fn finish(mut self, result: Result<(), String>) -> Result<(), String> {
+        let elapsed = self.started.elapsed().as_secs_f64();
         let (state, error) = match &result {
             Ok(()) => ("succeeded", None),
-            Err(err) => ("failed", Some(err.clone())),
+            Err(err) => ("failed", Some(logging::redact(err))),
         };
         match &error {
-            Some(err) => self.log(format!("FAILED: {err}")),
-            None => self.log("Finished."),
+            Some(err) => self.log(format!("FAILED after {elapsed:.1}s: {err}")),
+            None => self.log(format!("Finished in {elapsed:.1}s.")),
         }
 
         db::finish_job(&self.db_path, self.job_id, state, error.as_deref())

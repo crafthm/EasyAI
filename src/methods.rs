@@ -3,7 +3,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,11 @@ use sha2::{Digest, Sha256};
 use crate::catalog::{Method, MethodKind, Recipe, Service};
 use crate::db::InstalledApp;
 use crate::jobs::JobLogger;
+use crate::logging;
 use crate::probe;
+
+/// A service log is rotated once it exceeds this size.
+const SERVICE_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 
 pub struct MethodContext<'a> {
     pub recipe: &'a Recipe,
@@ -80,6 +84,7 @@ pub fn start(
     ctx: &MethodContext<'_>,
     record: &InstalledApp,
     log: &mut JobLogger,
+    launch_command: Option<&[String]>,
 ) -> Result<(), String> {
     if ctx.method.kind == MethodKind::Container {
         let runtime = container_runtime(ctx.method)?;
@@ -91,20 +96,28 @@ pub fn start(
         )?;
         return wait_for_health(ctx.method, log);
     }
-    let command = match ctx.method.service.as_ref() {
-        Some(_) => service_command(ctx, record)?,
-        None => detect_launch_command(Path::new(&record.install_dir), &ctx.recipe.name)
-            .ok_or_else(|| {
-                format!(
-                    "Method '{}' has no start command and no executable named after the app was found in {}.",
-                    ctx.method.id, record.install_dir
-                )
-            })?,
+    let command = match launch_command {
+        Some(command) => expand_command(
+            command,
+            record,
+            &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
+        ),
+        None => match ctx.method.service.as_ref() {
+            Some(_) => service_command(ctx, record)?,
+            None => detect_launch_command(Path::new(&record.install_dir), &ctx.recipe.name)
+                .ok_or_else(|| {
+                    format!(
+                        "Method '{}' has no start command and no executable named after the app was found in {}.",
+                        ctx.method.id, record.install_dir
+                    )
+                })?,
+        },
     };
     let logs = probe::logs_dir(ctx.app_data);
     fs::create_dir_all(&logs)
         .map_err(|err| format!("Failed to create log directory: {err}"))?;
     let service_log = logs.join(format!("{}-service.log", ctx.recipe.id));
+    logging::rotate_if_large(&service_log, SERVICE_LOG_MAX_BYTES);
     let stdout = OpenOptions::new()
         .create(true)
         .append(true)
@@ -132,6 +145,28 @@ pub fn start(
         .spawn()
         .map_err(|err| format!("Failed to start {}: {err}", ctx.recipe.name))?;
     let pid = child.id() as i32;
+    // A process that exits right after spawning is not a running service.
+    // The usual case is a command-line tool that prints help and returns when
+    // run without arguments, so fail instead of recording a false success.
+    if let Some(status) = exited_during_grace(&mut child, Duration::from_millis(500))
+        .map_err(|err| format!("Failed to check whether {} started: {err}", ctx.recipe.name))?
+    {
+        // Prefer the process's own output; it usually states the real problem
+        // (missing auth, bad flags) better than a generic guess.
+        let message = match last_log_line(&service_log) {
+            Some(line) => format!(
+                "{} exited immediately ({status}): {line}. See {}.",
+                ctx.recipe.name,
+                service_log.display()
+            ),
+            None => format!(
+                "{} exited immediately ({status}). It may be a command-line tool that does not stay running in the background. See {}.",
+                ctx.recipe.name,
+                service_log.display()
+            ),
+        };
+        return Err(message);
+    }
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -144,6 +179,30 @@ pub fn start(
         log.log("Started without health monitoring.");
     }
     Ok(())
+}
+
+/// Waits up to `grace` for the child to exit. Returns its status when it died
+/// during the grace period, or `None` when it is still running afterwards.
+fn exited_during_grace(child: &mut Child, grace: Duration) -> io::Result<Option<ExitStatus>> {
+    let deadline = Instant::now() + grace;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The last non-empty line written to a service log, trimmed to keep error
+/// messages readable.
+fn last_log_line(path: &Path) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    let line = content.lines().rev().find(|line| !line.trim().is_empty())?;
+    let trimmed = line.trim();
+    Some(trimmed.chars().take(300).collect())
 }
 
 /// Finds the app's own executable inside an install directory for methods that
@@ -1321,6 +1380,7 @@ fn run_command(
         return Err("Empty command.".to_string());
     }
     log.log(format!("$ {}", args.join(" ")));
+    let started = Instant::now();
     let mut command = Command::new(&args[0]);
     command.args(&args[1..]);
     command
@@ -1341,6 +1401,15 @@ fn run_command(
     for line in stdout.lines().chain(stderr.lines()) {
         log.log(line);
     }
+    let code = output
+        .status
+        .code()
+        .map(|code| code.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    log.log(format!(
+        "Exited with {code} in {:.1}s.",
+        started.elapsed().as_secs_f64()
+    ));
     if !output.status.success() {
         return Err(format!(
             "Command failed ({}): {}",
@@ -1553,8 +1622,8 @@ fn normalize_version(tag: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        container_image, container_run_command, detect_launch_command, expand_command,
-        manager_install, manager_uninstall, read_bom, write_bom, Bom,
+        container_image, container_run_command, detect_launch_command, exited_during_grace,
+        expand_command, manager_install, manager_uninstall, read_bom, write_bom, Bom,
     };
     use crate::catalog::{ImageSpec, Method, MethodKind};
     use serde_json::json;
@@ -1582,7 +1651,37 @@ fn detects_launch_binary_by_app_name() {
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
-fn container_method() -> Method {
+#[test]
+    fn detects_a_process_that_exits_during_the_grace_period() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 3"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = exited_during_grace(&mut child, std::time::Duration::from_millis(500))
+            .unwrap()
+            .expect("the process should exit immediately");
+        assert_eq!(status.code(), Some(3));
+    }
+
+    #[test]
+    fn keeps_waiting_when_the_process_is_still_alive() {
+        use std::process::{Command, Stdio};
+
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let status = exited_during_grace(&mut child, std::time::Duration::from_millis(100)).unwrap();
+        assert!(status.is_none());
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    fn container_method() -> Method {
         serde_json::from_value(json!({
             "id": "container",
             "kind": "container",

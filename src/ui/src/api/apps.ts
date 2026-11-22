@@ -99,6 +99,8 @@ export type AppDetail = Omit<
   provenanceJson: string | null
   bomPath: string | null
   usage: Usage | null
+  /** User-configured command the Start action runs instead of the recipe's. */
+  startCommand: string[] | null
 }
 
 export type ExistingInstall = {
@@ -285,6 +287,11 @@ export function getJobLog(jobId: number): Promise<string> {
   return invoke('get_job_log', { jobId })
 }
 
+// Best-effort: a failure to report must not surface another error.
+export function reportUiError(context: string, err: unknown): void {
+  invoke('log_ui_error', { context, message: String(err) }).catch(() => {})
+}
+
 export function previewRecipe(url: string): Promise<RecipePreview> {
   return invoke('preview_recipe', { url })
 }
@@ -298,9 +305,21 @@ export function importRecipe(url: string, sha256: string): Promise<void> {
   })
 }
 
-export function removeRecipe(appId: string): Promise<void> {
-  return invoke('remove_recipe', {
+export function removeApp(appId: string): Promise<void> {
+  return invoke('remove_app', {
     appId,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function saveStartCommand(
+  appId: string,
+  command: string[],
+): Promise<void> {
+  return invoke('save_start_command', {
+    appId,
+    command,
     origin: 'ui',
     confirmed: true,
   })
@@ -426,4 +445,35 @@ export function onJobFinished(
   return listen<JobFinishedEvent>('job-finished', (event) =>
     handler(event.payload),
   )
+}
+export type LanDevice = {
+  ip: string
+  hostname: string | null
+  os: string | null
+  arch: string | null
+  cpu: string | null
+  cores: number | null
+  ports: number[]
+  sshReady: boolean
+  note: string | null
+}
+
+export type LanScanResult = {
+  subnet: string
+  scanned: number
+  devices: LanDevice[]
+}
+
+export type SshCredentials = {
+  username: string
+  password?: string
+  keyPath?: string
+  port?: number
+}
+
+/** Sweep the current /24. Credentials are optional; they unlock CPU details. */
+export function scanLan(
+  credentials: SshCredentials | null,
+): Promise<LanScanResult> {
+  return invoke('scan_lan', { credentials })
 }

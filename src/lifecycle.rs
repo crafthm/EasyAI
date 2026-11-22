@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -55,6 +55,8 @@ pub struct AppDetail {
     pub provenance_json: Option<String>,
     pub bom_path: Option<String>,
     pub usage: Option<crate::catalog::Usage>,
+    /// A user-configured start command that overrides the recipe's default.
+    pub start_command: Option<Vec<String>>,
 }
 
 pub fn list_apps(
@@ -78,6 +80,7 @@ fn list_apps_with(
     probe_fn: impl Fn(&Recipe, &InstalledApp) -> (bool, Option<bool>),
 ) -> Result<Vec<AppSummary>, String> {
     let entries = crate::catalog::entries(app_data)?;
+    let removed: HashSet<String> = db::removed_apps(db_path).into_iter().collect();
     let installed: HashMap<String, InstalledApp> = db::list_installed(db_path)
         .map_err(|err| format!("Failed to load installed applications: {err}"))?
         .into_iter()
@@ -96,6 +99,7 @@ fn list_apps_with(
 
     Ok(entries
         .into_iter()
+        .filter(|entry| !removed.contains(&entry.recipe.id))
         .map(|entry| {
             let recipe = entry.recipe;
             let source_url = entry.source.map(|source| source.url);
@@ -222,6 +226,7 @@ pub fn get_app_detail(
         provenance_json: record.as_ref().and_then(|app| app.provenance_json.clone()),
         bom_path: record.as_ref().and_then(|app| app.bom_path.clone()),
         usage,
+        start_command: db::start_command(db_path, app_id),
     })
 }
 
@@ -333,7 +338,8 @@ pub fn start(
         install_root,
         platform: &platform,
     };
-    match methods::start(&context, &record, log) {
+    let launch_command = db::start_command(db_path, &recipe.id);
+    match methods::start(&context, &record, log, launch_command.as_deref()) {
         Ok(()) => {
             db::update_installed_state(db_path, &recipe.id, "running", true)
                 .map_err(|err| format!("Failed to update application state: {err}"))?;
@@ -582,6 +588,30 @@ mod tests {
         let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].id, "ollama");
+
+        std::fs::remove_dir_all(&data_dir).unwrap();
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn removed_bundled_entries_disappear_from_the_list() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-removed-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        db::init(&path).unwrap();
+        let data_dir = std::env::temp_dir().join(format!(
+            "easyai-lifecycle-removed-data-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let jobs = JobManager::new();
+
+        db::mark_app_removed(&path, "ollama").unwrap();
+        let apps = list_apps_with(&path, &data_dir, &jobs, |_, _| (false, None)).unwrap();
+        assert!(apps.iter().all(|app| app.id != "ollama"));
 
         std::fs::remove_dir_all(&data_dir).unwrap();
         std::fs::remove_file(&path).unwrap();

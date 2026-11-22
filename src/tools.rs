@@ -149,10 +149,16 @@ pub const TOOLS: &[ToolSpec] = &[
         inputs: &["url", "sha256", "origin", "confirmed"],
     },
     ToolSpec {
-        name: "remove_recipe",
-        description: "Remove an imported recipe when its app is not installed.",
+        name: "remove_app",
+        description: "Remove an application from the catalog when it is not installed.",
         mutating: true,
         inputs: &["app_id", "origin", "confirmed"],
+    },
+    ToolSpec {
+        name: "save_start_command",
+        description: "Set or clear the command the Start action runs for an installed app.",
+        mutating: true,
+        inputs: &["app_id", "command", "origin", "confirmed"],
     },
     ToolSpec {
         name: "preview_bundle",
@@ -206,7 +212,8 @@ mod tests {
             "get_job_log",
             "preview_recipe",
             "import_recipe",
-            "remove_recipe",
+            "remove_app",
+            "save_start_command",
             "preview_bundle",
             "import_bundle",
             "export_bundle",

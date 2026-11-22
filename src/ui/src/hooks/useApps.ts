@@ -5,6 +5,7 @@ import {
   listApps,
   onAppState,
   onUpdateAvailable,
+  reportUiError,
   startApp,
   stopApp,
   type AppStateEvent,
@@ -88,7 +89,7 @@ export function useApps() {
         if (disposed) fn()
         else unlistenUpdate = fn
       })
-      .catch(() => {})
+      .catch((err) => reportUiError('subscribe to update events', err))
 
     return () => {
       disposed = true

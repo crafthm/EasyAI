@@ -9,6 +9,7 @@ use crate::bundle::BundleEntry;
 use crate::catalog::{self, Method, Recipe, RecipePreview};
 use crate::db::{self, JobRecord};
 use crate::jobs::{self, JobLogger, Phase};
+use crate::lanscan::{self, LanScanResult, SshCredentials};
 use crate::lifecycle::{self, AppDetail, AppSummary};
 use crate::probe;
 use crate::resolve::{self, InstallPlan, MethodSettings, Preferences, TIERS};
@@ -444,13 +445,13 @@ pub async fn import_recipe(
 }
 
 #[tauri::command]
-pub async fn remove_recipe(
+pub async fn remove_app(
     state: State<'_, AppState>,
     app_id: String,
     origin: Option<String>,
     confirmed: Option<bool>,
 ) -> Result<(), String> {
-    authorize("remove_recipe", origin, confirmed)?;
+    authorize("remove_app", origin, confirmed)?;
     let app_data = state.app_data_dir.clone();
     let db_path = state.db_path.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -458,12 +459,69 @@ pub async fn remove_recipe(
             .map_err(|err| format!("Failed to load application state: {err}"))?
             .is_some()
         {
-            return Err("Uninstall the application before removing its recipe.".to_string());
+            return Err("Uninstall the application before removing it.".to_string());
         }
-        catalog::remove_recipe(&app_data, &app_id)
+        if catalog::is_imported(&app_data, &app_id) {
+            catalog::remove_recipe(&app_data, &app_id)?;
+        } else {
+            // Bundled recipes live inside the binary, so removal is recorded
+            // instead of deleting a file the installer cannot reach.
+            catalog::find(&app_data, &app_id)?;
+            db::mark_app_removed(&db_path, &app_id)
+                .map_err(|err| format!("Failed to remove the application: {err}"))?;
+        }
+        remove_app_logs(&app_data, &db_path, &app_id);
+        Ok(())
     })
     .await
-    .map_err(|err| format!("Failed to remove the recipe: {err}"))?
+    .map_err(|err| format!("Failed to remove the application: {err}"))?
+}
+
+/// Removes the service log and every job log belonging to a removed app.
+fn remove_app_logs(app_data: &Path, db_path: &Path, app_id: &str) {
+    let service_log = probe::logs_dir(app_data).join(format!("{app_id}-service.log"));
+    let _ = std::fs::remove_file(&service_log);
+    match db::delete_jobs_for_app(db_path, app_id) {
+        Ok(paths) => {
+            for path in paths {
+                if !path.is_empty() {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+        Err(err) => log::warn!("Failed to delete job records for {app_id}: {err}"),
+    }
+}
+
+/// Records a failure reported by the webview in the application log.
+#[tauri::command]
+pub fn log_ui_error(context: String, message: String) {
+    let context: String = context.chars().take(200).collect();
+    let message: String = message.chars().take(4000).collect();
+    log::warn!(target: "ui", "{context}: {message}");
+}
+
+#[tauri::command]
+pub async fn save_start_command(
+    state: State<'_, AppState>,
+    app_id: String,
+    command: Vec<String>,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<(), String> {
+    authorize("save_start_command", origin, confirmed)?;
+    let db_path = state.db_path.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let command: Vec<String> = command
+            .into_iter()
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+        db::set_start_command(&db_path, &app_id, &command)
+            .map_err(|err| format!("Failed to save the start command: {err}"))
+    })
+    .await
+    .map_err(|err| format!("Failed to save the start command: {err}"))?
 }
 
 #[tauri::command]
@@ -906,4 +964,13 @@ pub async fn get_bom(
 #[tauri::command]
 pub fn list_tools() -> Vec<ToolSpec> {
     tools::TOOLS.to_vec()
+}
+
+/// Sweep the local /24. Credentials are optional: without them only banners
+/// and open ports are reported.
+#[tauri::command]
+pub async fn scan_lan(credentials: Option<SshCredentials>) -> Result<LanScanResult, String> {
+    tauri::async_runtime::spawn_blocking(move || lanscan::scan(credentials))
+        .await
+        .map_err(|err| format!("The network scan failed: {err}"))?
 }

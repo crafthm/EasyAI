@@ -443,6 +443,64 @@ pub fn set_setting(path: &Path, key: &str, value: &str) -> rusqlite::Result<()> 
     Ok(())
 }
 
+/// Settings key holding the ids of catalog entries the user removed.
+pub const REMOVED_APPS_KEY: &str = "removed_apps";
+
+/// Catalog entries the user removed.
+///
+/// Bundled recipes are compiled into the binary, so removing one records its id
+/// here instead of deleting a file. Imported recipes are deleted from disk and
+/// never appear in this list.
+pub fn removed_apps(path: &Path) -> Vec<String> {
+    get_setting(path, REMOVED_APPS_KEY)
+        .ok()
+        .flatten()
+        .map(|raw| {
+            raw.split(',')
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+pub fn mark_app_removed(path: &Path, app_id: &str) -> rusqlite::Result<()> {
+    let mut ids = removed_apps(path);
+    if !ids.iter().any(|id| id == app_id) {
+        ids.push(app_id.to_string());
+    }
+    set_setting(path, REMOVED_APPS_KEY, &ids.join(","))
+}
+
+/// Settings key prefix for the user-configured start command of an app.
+pub const START_COMMAND_PREFIX: &str = "start_command:";
+
+/// The start command the user configured for an installed app, if any.
+///
+/// Stored as a JSON string array so each argument keeps its boundaries.
+pub fn start_command(path: &Path, app_id: &str) -> Option<Vec<String>> {
+    get_setting(path, &format!("{START_COMMAND_PREFIX}{app_id}"))
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+        .filter(|command| !command.is_empty())
+}
+
+pub fn set_start_command(
+    path: &Path,
+    app_id: &str,
+    command: &[String],
+) -> rusqlite::Result<()> {
+    let key = format!("{START_COMMAND_PREFIX}{app_id}");
+    if command.is_empty() {
+        // An empty value means "use the recipe's own start behavior".
+        return set_setting(path, &key, "");
+    }
+    let raw = serde_json::to_string(command).unwrap_or_default();
+    set_setting(path, &key, &raw)
+}
+
 pub fn create_job(
     path: &Path,
     app_id: &str,
@@ -494,6 +552,37 @@ pub fn mark_running_jobs_failed(path: &Path, error: &str) -> rusqlite::Result<us
          WHERE state = 'running'",
         params![error],
     )
+}
+
+/// Deletes every job row except the newest `keep` and returns the log paths
+/// that belonged to the deleted rows, so the caller can remove the files.
+pub fn prune_jobs(path: &Path, keep: usize) -> rusqlite::Result<Vec<String>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare(
+        "SELECT log_path FROM jobs
+         WHERE id NOT IN (SELECT id FROM jobs ORDER BY id DESC LIMIT ?1)",
+    )?;
+    let log_paths = stmt
+        .query_map(params![keep as i64], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    conn.execute(
+        "DELETE FROM jobs WHERE id NOT IN (SELECT id FROM jobs ORDER BY id DESC LIMIT ?1)",
+        params![keep as i64],
+    )?;
+    Ok(log_paths)
+}
+
+/// Deletes every job row for `app_id` and returns the removed log paths.
+pub fn delete_jobs_for_app(path: &Path, app_id: &str) -> rusqlite::Result<Vec<String>> {
+    let conn = Connection::open(path)?;
+    let mut stmt = conn.prepare("SELECT log_path FROM jobs WHERE app_id = ?1")?;
+    let log_paths = stmt
+        .query_map(params![app_id], |row| row.get(0))?
+        .collect::<rusqlite::Result<Vec<String>>>()?;
+    drop(stmt);
+    conn.execute("DELETE FROM jobs WHERE app_id = ?1", params![app_id])?;
+    Ok(log_paths)
 }
 
 pub fn list_jobs(path: &Path, app_id: &str) -> rusqlite::Result<Vec<JobRecord>> {
@@ -707,6 +796,78 @@ mod tests {
         assert!(stale.error.unwrap().contains("Interrupted"));
 
         assert_eq!(list_jobs(&path, "ollama").unwrap().len(), 2);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn prune_jobs_keeps_newest_and_returns_log_paths() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-prune-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        init(&path).unwrap();
+
+        for index in 0..3 {
+            create_job(
+                &path,
+                "ollama",
+                "install",
+                "ui",
+                &format!("/tmp/job-{index}.log"),
+                None,
+                None,
+            )
+            .unwrap();
+        }
+
+        let removed = prune_jobs(&path, 2).unwrap();
+        assert_eq!(removed, vec!["/tmp/job-0.log".to_string()]);
+        assert_eq!(list_jobs(&path, "ollama").unwrap().len(), 2);
+
+        let removed = delete_jobs_for_app(&path, "ollama").unwrap();
+        assert_eq!(removed.len(), 2);
+        assert!(list_jobs(&path, "ollama").unwrap().is_empty());
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn removed_apps_accumulate_without_duplicates() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-removed-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        init(&path).unwrap();
+        assert!(removed_apps(&path).is_empty());
+        mark_app_removed(&path, "demo").unwrap();
+        mark_app_removed(&path, "demo").unwrap();
+        mark_app_removed(&path, "other").unwrap();
+        assert_eq!(removed_apps(&path), vec!["demo", "other"]);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn start_command_roundtrip_and_clear() {
+        let path = std::env::temp_dir().join(format!(
+            "easyai-db-start-command-test-{}.db",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        init(&path).unwrap();
+        assert!(start_command(&path, "demo").is_none());
+
+        let command = vec![
+            "{install_dir}/demo".to_string(),
+            "serve".to_string(),
+            "--port".to_string(),
+            "8080".to_string(),
+        ];
+        set_start_command(&path, "demo", &command).unwrap();
+        assert_eq!(start_command(&path, "demo"), Some(command));
+
+        set_start_command(&path, "demo", &[]).unwrap();
+        assert!(start_command(&path, "demo").is_none());
         std::fs::remove_file(&path).unwrap();
     }
 

@@ -203,8 +203,12 @@ pub fn check_all(app: &AppHandle, db_path: &Path, app_data: &Path) -> Vec<Update
     let records = db::list_installed(db_path).unwrap_or_default();
     let mut statuses = Vec::new();
     for record in records.into_iter().take(MAX_CHECKS_PER_RUN) {
-        let Ok(status) = check(db_path, app_data, &record.app_id) else {
-            continue;
+        let status = match check(db_path, app_data, &record.app_id) {
+            Ok(status) => status,
+            Err(err) => {
+                log::warn!("Update check failed for '{}': {err}", record.app_id);
+                continue;
+            }
         };
         if status.available {
             emit(app, &status);
@@ -226,12 +230,25 @@ pub fn due(db_path: &Path) -> bool {
 }
 
 fn mark_checked(db_path: &Path) {
-    let _ = db::set_setting(db_path, LAST_CHECK_KEY, &now());
+    if let Err(err) = db::set_setting(db_path, LAST_CHECK_KEY, &now()) {
+        log::warn!("Failed to record the update check time: {err}");
+    }
 }
 
 fn store(db_path: &Path, status: &UpdateStatus) {
-    if let Ok(json) = serde_json::to_string(status) {
-        let _ = db::set_setting(db_path, &format!("{CACHE_PREFIX}{}", status.app_id), &json);
+    let json = match serde_json::to_string(status) {
+        Ok(json) => json,
+        Err(err) => {
+            log::warn!("Failed to serialize the update status: {err}");
+            return;
+        }
+    };
+    if let Err(err) = db::set_setting(
+        db_path,
+        &format!("{CACHE_PREFIX}{}", status.app_id),
+        &json,
+    ) {
+        log::warn!("Failed to cache the update status: {err}");
     }
 }
 

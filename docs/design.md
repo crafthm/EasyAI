@@ -250,25 +250,23 @@ Lifecycle operations are exposed through a typed tool registry. Mutating tools r
 (`ui` or `assistant`), and assistant-originated mutations require explicit confirmation. This is
 the boundary that keeps a future assistant on the same deterministic path as the UI.
 
-#### 4.4.2 Importing application recipes from a URL
+#### 4.4.2 Importing applications from a GitHub repository
 
-The grid is not limited to the bundled catalog. The `+` action accepts a recipe URL, or a GitHub
-repository URL. A repository URL is never cloned and is not probed for a recipe file: the app
-builds a candidate recipe from the latest release and package manifest, then shows a preview of the
-source, release asset, start command, health check, and uninstall behavior before anything is
-written.
+The grid is not limited to the bundled catalog. The `+` action accepts a GitHub repository URL.
+The repository is never cloned and is not probed for a recipe file: the app builds a candidate
+recipe from the latest release and package manifest, then shows a preview of the source, release
+asset, start command, health check, and uninstall behavior before anything is written.
 
 An imported recipe is stored in `<app-data>/catalog/imported/<id>.json` together with its source
 URL and sha256, and behaves exactly like a bundled recipe afterwards. Import rules:
 
-- `https` only (plain `http` is accepted only for loopback development servers);
-- maximum 512 KB, with redirects limited;
 - the sha256 shown in the preview is re-checked when the recipe is imported;
 - imported recipes cannot override a bundled recipe, require elevation, or use an install kind
   the engine does not support;
 - the current platform must be supported;
 - recipes are never updated automatically, and can be removed from the catalog only while the
-  application is not installed.
+  application is not installed; removing an imported recipe deletes its file, while removing a
+  bundled one records its id in `removed_apps` so the grid stops listing it.
 
 #### 4.4.3 Importing and exporting easyai.json bundles
 

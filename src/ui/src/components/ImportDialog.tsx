@@ -27,7 +27,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
   async function handlePreview() {
     const value = url.trim()
     if (!value) {
-      setError('Enter a recipe or GitHub repository URL.')
+      setError('Enter a GitHub repository URL.')
       return
     }
     setBusy(true)
@@ -95,7 +95,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
         </header>
 
         <p className="detail-description">
-          Paste a recipe URL, or a GitHub repository.
+          Paste a GitHub repository URL.
         </p>
 
         <div className="import-row">
@@ -173,7 +173,7 @@ export function ImportDialog({ onClose, onImported }: Props) {
             )}
             {preview.conflict && (
               <p className="preview-warning preview-blocked">
-                An application with this id already exists.
+                This app is already in your catalog. See the note below for what to do.
               </p>
             )}
             {preview.warnings.map((warning) => (

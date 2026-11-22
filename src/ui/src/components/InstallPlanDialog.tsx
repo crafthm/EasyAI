@@ -31,8 +31,8 @@ export function InstallPlanDialog({
   const [loading, setLoading] = useState(true)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [allowAdvanced, setAllowAdvanced] = useState(false)
-  const [allowElevation, setAllowElevation] = useState(false)
+  const [allowAdvanced, setAllowAdvanced] = useState(true)
+  const [allowElevation, setAllowElevation] = useState(true)
 
   useEffect(() => {
     let disposed = false

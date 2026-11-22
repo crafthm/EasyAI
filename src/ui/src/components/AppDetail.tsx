@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
   discoverUsage,
@@ -14,8 +14,10 @@ import {
   openLocalUrl,
   openUrl,
   reinferUsage,
-  removeRecipe,
+  removeApp,
+  reportUiError,
   runUsageCheck,
+  saveStartCommand,
   uninstallApp,
   type AppDetail as AppDetailData,
   type DetectedEntry,
@@ -39,6 +41,16 @@ function UsageBadge({ state }: { state?: string }) {
       {USAGE_STATE_LABEL[state] ?? state}
     </span>
   )
+}
+
+const MAX_LIVE_LOG_LINES = 2000
+
+// Keeps the in-memory live transcript bounded during long installs.
+function appendLiveLine(current: string, line: string): string {
+  const next = `${current}${line}\n`
+  const lines = next.split('\n')
+  if (lines.length <= MAX_LIVE_LOG_LINES) return next
+  return lines.slice(-MAX_LIVE_LOG_LINES).join('\n')
 }
 
 function slug(value: string): string {
@@ -72,6 +84,9 @@ export function AppDetail({
   const [jobs, setJobs] = useState<JobRecord[]>([])
   const [log, setLog] = useState<string | null>(null)
   const [liveLog, setLiveLog] = useState('')
+  const [liveJobId, setLiveJobId] = useState<number | null>(null)
+  const [selectedJobId, setSelectedJobId] = useState<number | null>(null)
+  const liveJobIdRef = useRef<number | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [copiedKey, setCopiedKey] = useState<string | null>(null)
@@ -80,6 +95,7 @@ export function AppDetail({
   const [verifying, setVerifying] = useState(false)
   const [reanalyzing, setReanalyzing] = useState(false)
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
+  const [startCommandInput, setStartCommandInput] = useState('')
 
   useEffect(() => {
     let disposed = false
@@ -92,22 +108,23 @@ export function AppDetail({
       .then((next) => {
         if (disposed) return
         setDetail(next)
+        setStartCommandInput(next.startCommand?.join(' ') ?? '')
         if (next.state !== 'not_installed') {
           getUpdateStatus(appId)
             .then((status) => {
               if (!disposed) setUpdate(status)
             })
-            .catch(() => {})
+            .catch((err) => reportUiError('load update status', err))
           getUsageReport(appId)
             .then((report) => {
               if (!disposed) setUsageReport(report)
             })
-            .catch(() => {})
+            .catch((err) => reportUiError('load usage report', err))
           discoverUsage(appId)
             .then((entries) => {
               if (!disposed) setDetected(entries)
             })
-            .catch(() => {})
+            .catch((err) => reportUiError('discover usage', err))
         }
       })
       .catch((err) => {
@@ -122,15 +139,22 @@ export function AppDetail({
       })
 
     onJobLog((event) => {
-      if (event.appId === appId) {
-        setLiveLog((current) => `${current}${event.line}\n`)
+      if (event.appId !== appId) return
+      const sameJob = liveJobIdRef.current === event.jobId
+      // A new job takes over the view so the running transcript stays visible.
+      if (!sameJob && liveJobIdRef.current !== null) {
+        setSelectedJobId(null)
+        setLog(null)
       }
+      liveJobIdRef.current = event.jobId
+      setLiveJobId(event.jobId)
+      setLiveLog((current) => appendLiveLine(sameJob ? current : '', event.line))
     })
       .then((fn) => {
         if (disposed) fn()
         else unlistenLog = fn
       })
-      .catch(() => {})
+      .catch((err) => reportUiError('subscribe to job log', err))
 
     onJobFinished((event) => {
       if (event.appId !== appId) return
@@ -138,18 +162,18 @@ export function AppDetail({
         .then((next) => {
           if (!disposed) setJobs(next)
         })
-        .catch(() => {})
+        .catch((err) => reportUiError('refresh jobs', err))
       getAppDetail(appId)
         .then((next) => {
           if (!disposed) setDetail(next)
         })
-        .catch(() => {})
+        .catch((err) => reportUiError('refresh app detail', err))
     })
       .then((fn) => {
         if (disposed) fn()
         else unlistenFinished = fn
       })
-      .catch(() => {})
+      .catch((err) => reportUiError('subscribe to job completion', err))
 
     onAppState((event) => {
       if (event.appId !== appId) return
@@ -173,14 +197,14 @@ export function AppDetail({
           .then((entries) => {
             if (!disposed) setDetected(entries)
           })
-          .catch(() => {})
+          .catch((err) => reportUiError('discover usage after start', err))
       }
     })
       .then((fn) => {
         if (disposed) fn()
         else unlistenState = fn
       })
-      .catch(() => {})
+      .catch((err) => reportUiError('subscribe to app state', err))
 
     onUpdateAvailable((event) => {
       if (event.appId !== appId) return
@@ -197,7 +221,7 @@ export function AppDetail({
         if (disposed) fn()
         else unlistenUpdate = fn
       })
-      .catch(() => {})
+      .catch((err) => reportUiError('subscribe to update events', err))
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()
@@ -218,6 +242,7 @@ export function AppDetail({
     setBusy(true)
     setError(null)
     try {
+      setSelectedJobId(job.id)
       setLog(await getJobLog(job.id))
     } catch (err) {
       setError(String(err))
@@ -286,17 +311,36 @@ export function AppDetail({
     }
   }
 
-  async function handleRemoveRecipe() {
+  async function handleSaveStartCommand() {
+    if (!detail) return
+    setBusy(true)
+    setError(null)
+    try {
+      const command = startCommandInput.trim()
+        ? startCommandInput.trim().split(/\s+/)
+        : []
+      await saveStartCommand(appId, command)
+      setDetail(await getAppDetail(appId))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleRemoveApp() {
     if (!detail) return
     const confirmed = window.confirm(
-      `Remove "${detail.name}" from the catalog? Its imported recipe will be deleted.`,
+      detail.sourceUrl
+        ? `Remove "${detail.name}" from the catalog? Its imported recipe will be deleted.`
+        : `Remove "${detail.name}" from the catalog?`,
     )
     if (!confirmed) return
 
     setBusy(true)
     setError(null)
     try {
-      await removeRecipe(appId)
+      await removeApp(appId)
       onCatalogChanged()
       onClose()
     } catch (err) {
@@ -323,7 +367,12 @@ export function AppDetail({
     }
   }
 
-  const visibleLog = log ?? liveLog
+  const visibleLog =
+    selectedJobId === null
+      ? liveLog
+      : selectedJobId === liveJobId
+        ? liveLog || log || ''
+        : log ?? ''
   const usage = detail?.usage ?? null
   const action = detail ? primaryAction(detail) : null
   const usageStates = new Map(
@@ -429,6 +478,42 @@ export function AppDetail({
               </div>
             )}
 
+            {detail.state !== 'not_installed' &&
+              detail.methodKind !== 'container' && (
+              <div className="plan-section">
+                <h3 className="detail-section-title">Start command</h3>
+                <p className="detail-description">
+                  Optional. Overrides the command the Start action runs. Use{' '}
+                  {'{install_dir}'} for the install directory.
+                </p>
+                <div className="import-row">
+                  <input
+                    className="popover-input"
+                    type="text"
+                    placeholder="{install_dir}/app serve"
+                    value={startCommandInput}
+                    disabled={busy}
+                    onChange={(event) =>
+                      setStartCommandInput(event.target.value)
+                    }
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter' && !busy) {
+                        void handleSaveStartCommand()
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    className="popover-button"
+                    disabled={busy}
+                    onClick={() => void handleSaveStartCommand()}
+                  >
+                    Save
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="detail-actions">
               {action && (
                 <button
@@ -463,12 +548,12 @@ export function AppDetail({
                   Update
                 </button>
               )}
-              {detail.sourceUrl && detail.state === 'not_installed' && (
+              {detail.state === 'not_installed' && (
                 <button
                   type="button"
                   className="popover-button"
                   disabled={busy}
-                  onClick={() => void handleRemoveRecipe()}
+                  onClick={() => void handleRemoveApp()}
                 >
                   Remove from catalog
                 </button>
@@ -726,9 +811,11 @@ export function AppDetail({
           </ul>
         )}
 
-        {(log !== null || liveLog !== '') && (
+        {(selectedJobId !== null ? log !== null : liveLog !== '') && (
           <>
-            <h3 className="detail-section-title">Log</h3>
+            <h3 className="detail-section-title">
+              Log{selectedJobId !== null ? ` #${selectedJobId}` : ' (live)'}
+            </h3>
             <pre className="job-log">{visibleLog}</pre>
           </>
         )}

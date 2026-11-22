@@ -6,10 +6,12 @@ import {
   GearIcon,
   ImportIcon,
   PlusIcon,
+  RadarIcon,
   SearchIcon,
 } from './icons'
 import { BundleImportDialog } from './BundleImportDialog'
 import { ImportDialog } from './ImportDialog'
+import { NetworkScanDialog } from './NetworkScanDialog'
 import { SettingsPopover } from './SettingsPopover'
 
 export type InstallFilter =
@@ -44,6 +46,7 @@ export function Toolbar({
 }: Props) {
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
+  const [scanOpen, setScanOpen] = useState(false)
   const [searchOpen, setSearchOpen] = useState(false)
   const [bundle, setBundle] = useState<{
     fileName: string
@@ -168,6 +171,21 @@ export function Toolbar({
           <button
             type="button"
             className="icon-button"
+            title="Scan local network"
+            aria-label="Scan local network"
+            aria-haspopup="dialog"
+            aria-expanded={scanOpen}
+            onClick={() => {
+              setScanOpen(true)
+              setImportOpen(false)
+              setSettingsOpen(false)
+            }}
+          >
+            <RadarIcon />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
             title="Import easyai.json"
             aria-label="Import easyai.json"
             disabled={actionBusy}
@@ -239,6 +257,7 @@ export function Toolbar({
           onImported={onImported}
         />
       )}
+      {scanOpen && <NetworkScanDialog onClose={() => setScanOpen(false)} />}
       {bundle && (
         <BundleImportDialog
           fileName={bundle.fileName}
