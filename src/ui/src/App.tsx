@@ -31,6 +31,7 @@ function App() {
   const { apps, loading, error, install, start, stop, refresh, dismissError } =
     useApps()
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const [focusStartId, setFocusStartId] = useState<string | null>(null)
   const [plan, setPlan] = useState<{
     app: AppSummary
     upgrade: boolean
@@ -38,7 +39,10 @@ function App() {
   const planApp = plan?.app ?? null
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<InstallFilter>('all')
-  const closeDetail = useCallback(() => setSelectedId(null), [])
+  const closeDetail = useCallback(() => {
+    setSelectedId(null)
+    setFocusStartId(null)
+  }, [])
   const closePlan = useCallback(() => setPlan(null), [])
 
   const visibleApps = useMemo(
@@ -51,7 +55,14 @@ function App() {
     if (app.state === 'not_installed') {
       setPlan({ app, upgrade: false })
     } else if (app.state === 'stopped') {
-      void start(app.id)
+      if (app.startable) {
+        void start(app.id)
+      } else {
+        // Send the user straight to the start-command editor instead of
+        // running a command that cannot stay alive.
+        setSelectedId(app.id)
+        setFocusStartId(app.id)
+      }
     } else if (app.state === 'running' && app.managed) {
       void stop(app.id)
     }
@@ -105,9 +116,13 @@ function App() {
         <AppDetail
           appId={selectedId}
           onClose={closeDetail}
-          onCatalogChanged={() => void refresh()}
+          onCatalogChanged={() => {
+            setFocusStartId(null)
+            void refresh()
+          }}
           onPrimaryAction={handlePrimaryAction}
           onUpgrade={handleUpgrade}
+          focusStartCommand={focusStartId === selectedId}
         />
       )}
       {planApp && plan && (

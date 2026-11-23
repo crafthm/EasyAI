@@ -25,6 +25,10 @@ export type AppSummary = {
   sourceUrl: string | null
   methodId: string | null
   methodKind: string | null
+  /** Whether a verified long-running start command is available. */
+  startable: boolean
+  /** Why Start is unavailable, shown next to the start-command editor. */
+  startReason: string | null
   /** Newest published version when it is newer than the installed one. */
   updateAvailable: string | null
 }
@@ -103,6 +107,27 @@ export type AppDetail = Omit<
   startCommand: string[] | null
 }
 
+export type StartCandidate = {
+  command: string[]
+  health:
+    | { type: 'http'; url: string }
+    | { type: 'exec'; command: string[] }
+    | { type: 'port'; port: number }
+    | { type: 'process' }
+    | { type: 'none' }
+  detach: 'foreground' | 'daemonize'
+  confidence: string
+  reason: string
+  stopCommand: string[] | null
+}
+
+export type StartVerification = {
+  ok: boolean
+  status: number | null
+  output: string
+  reason: string
+}
+
 export type ExistingInstall = {
   methodId: string | null
   kind: string
@@ -136,7 +161,8 @@ export type RecipeMethod = {
   kind: string
   when: { os: string[]; arch: string[] }
   source: { repo: string | null; asset: Record<string, string> } | null
-  service: { command: string[]; health_url: string } | null
+  service: { command: string[]; health_url?: string } | null
+  manageable?: boolean | null
 }
 
 export type Recipe = {
@@ -318,6 +344,49 @@ export function saveStartCommand(
   command: string[],
 ): Promise<void> {
   return invoke('save_start_command', {
+    appId,
+    command,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export type HealthCheck = StartCandidate['health']
+export type DetachMode = StartCandidate['detach']
+
+export function applyStartContract(
+  appId: string,
+  command: string[],
+  health: HealthCheck,
+  detach: DetachMode,
+  stopCommand: string[] | null,
+): Promise<void> {
+  return invoke('apply_start_contract', {
+    appId,
+    command,
+    health,
+    detach,
+    stopCommand,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function detectStartCommands(
+  appId: string,
+): Promise<StartCandidate[]> {
+  return invoke('detect_start_commands', {
+    appId,
+    origin: 'ui',
+    confirmed: true,
+  })
+}
+
+export function testStartCommand(
+  appId: string,
+  command: string[],
+): Promise<StartVerification> {
+  return invoke('test_start_command', {
     appId,
     command,
     origin: 'ui',

@@ -107,6 +107,12 @@ pub struct Method {
     pub elevation: bool,
     pub version: Option<VersionSource>,
     pub service: Option<Service>,
+    /// Whether Start/Stop are offered for this method. `None` keeps the legacy
+    /// behaviour: a method is manageable when it declares a service. Generated
+    /// recipes set this to `false` explicitly because an executable in the
+    /// release archive is not a long-running service by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manageable: Option<bool>,
     pub uninstall: Option<Uninstall>,
     pub size: Option<u64>,
     pub source: Option<MethodSource>,
@@ -435,13 +441,107 @@ pub struct VersionSource {
     pub image: Option<String>,
 }
 
+/// How EasyAI decides that a started process is ready and stays healthy.
+/// HTTP is only one option: most CLIs and daemons expose no HTTP endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum HealthCheck {
+    Http { url: String },
+    Exec { command: Vec<String> },
+    Port { port: u16 },
+    Process,
+    None,
+}
+
+impl HealthCheck {
+    /// Checks that are actively polled rather than implied by the PID file.
+    pub fn is_active(&self) -> bool {
+        matches!(
+            self,
+            HealthCheck::Http { .. } | HealthCheck::Exec { .. } | HealthCheck::Port { .. }
+        )
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            HealthCheck::Http { .. } => "http",
+            HealthCheck::Exec { .. } => "exec",
+            HealthCheck::Port { .. } => "port",
+            HealthCheck::Process => "process",
+            HealthCheck::None => "none",
+        }
+    }
+
+    pub fn validate(&self, recipe_id: &str, method_id: &str) -> Result<(), String> {
+        let invalid = |reason: &str| {
+            format!("Recipe '{recipe_id}' method '{method_id}' has an invalid {reason} health check.")
+        };
+        match self {
+            HealthCheck::Http { url }
+                if !(url.starts_with("http://") || url.starts_with("https://")) =>
+            {
+                Err(invalid("http"))
+            }
+            HealthCheck::Exec { command } if command.is_empty() => Err(invalid("exec")),
+            HealthCheck::Port { port } if *port == 0 => Err(invalid("port")),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Whether the start command stays in the foreground or daemonizes itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetachMode {
+    #[default]
+    Foreground,
+    Daemonize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StopSpec {
+    ProcessGroup,
+    Command { command: Vec<String> },
+}
+
+impl Default for StopSpec {
+    fn default() -> Self {
+        StopSpec::ProcessGroup
+    }
+}
+
+/// Where a start contract came from, so an inferred guess is never treated as
+/// a verified one.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct Provenance {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub confidence: String,
+    #[serde(default)]
+    pub verified: bool,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Service {
     #[serde(default)]
     pub command: Vec<String>,
+    /// Legacy HTTP health endpoint. New recipes should declare `health`.
+    #[serde(default)]
     pub health_url: String,
     #[serde(default)]
     pub env: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<HealthCheck>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ready_timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub detach: DetachMode,
+    #[serde(default)]
+    pub stop: StopSpec,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -861,6 +961,67 @@ impl Recipe {
 }
 
 impl Method {
+    /// Start/Stop are only offered when the method has an explicit start
+    /// contract. A bare executable in the install directory is not one.
+    pub fn is_manageable(&self) -> bool {
+        self.manageable.unwrap_or_else(|| {
+            self.service.as_ref().is_some_and(|service| {
+                !service.command.is_empty() || self.kind == MethodKind::Container
+            })
+        })
+    }
+
+    pub fn start_command(&self) -> Option<&Vec<String>> {
+        self.service
+            .as_ref()
+            .filter(|_| self.is_manageable())
+            .map(|service| &service.command)
+            .filter(|command| !command.is_empty())
+    }
+
+    /// Legacy `health_url` recipes keep working; new recipes can declare any
+    /// check type. A service with no check falls back to PID liveness.
+    pub fn effective_health(&self) -> HealthCheck {
+        let Some(service) = &self.service else {
+            return HealthCheck::None;
+        };
+        if let Some(health) = &service.health {
+            return health.clone();
+        }
+        if !service.health_url.trim().is_empty() {
+            return HealthCheck::Http {
+                url: service.health_url.clone(),
+            };
+        }
+        if self.kind == MethodKind::Container {
+            return HealthCheck::None;
+        }
+        HealthCheck::Process
+    }
+
+    pub fn ready_timeout_ms(&self) -> u64 {
+        self.service
+            .as_ref()
+            .and_then(|service| service.ready_timeout_ms)
+            .unwrap_or(10_000)
+            .clamp(500, 120_000)
+    }
+
+    pub fn detach_mode(&self) -> DetachMode {
+        self.service
+            .as_ref()
+            .map(|service| service.detach)
+            .unwrap_or_default()
+    }
+
+    pub fn stop_spec(&self) -> &StopSpec {
+        static DEFAULT: StopSpec = StopSpec::ProcessGroup;
+        self.service
+            .as_ref()
+            .map(|service| &service.stop)
+            .unwrap_or(&DEFAULT)
+    }
+
     pub fn validate(&self, recipe_id: &str) -> Result<(), String> {
         if self.id.trim().is_empty() {
             return Err(format!(
@@ -896,22 +1057,53 @@ impl Method {
                 recipe_id, self.id
             ));
         }
-        if let Some(service) = &self.service {
-            if service.health_url.is_empty()
-                || !(service.health_url.starts_with("http://")
-                    || service.health_url.starts_with("https://"))
-            {
-                return Err(format!(
-                    "Recipe '{}' method '{}' has an invalid health URL.",
+        if self.is_manageable() {
+            let service = self.service.as_ref().ok_or_else(|| {
+                format!(
+                    "Recipe '{}' method '{}' is manageable but has no service section.",
                     recipe_id, self.id
-                ));
-            }
+                )
+            })?;
             if service.command.is_empty() && self.kind != MethodKind::Container {
                 return Err(format!(
                     "Recipe '{}' method '{}' is missing a start command.",
                     recipe_id, self.id
                 ));
             }
+            let health = self.effective_health();
+            health.validate(recipe_id, &self.id)?;
+            if matches!(health, HealthCheck::None) {
+                return Err(format!(
+                    "Recipe '{}' method '{}' is missing a health check.",
+                    recipe_id, self.id
+                ));
+            }
+            if service.detach == DetachMode::Daemonize && !health.is_active() {
+                return Err(format!(
+                    "Recipe '{}' method '{}' daemonizes but has no active health check.",
+                    recipe_id, self.id
+                ));
+            }
+            if service.detach == DetachMode::Daemonize
+                && matches!(self.stop_spec(), StopSpec::ProcessGroup)
+            {
+                return Err(format!(
+                    "Recipe '{}' method '{}' daemonizes but has no stop command.",
+                    recipe_id, self.id
+                ));
+            }
+            if let StopSpec::Command { command } = self.stop_spec() {
+                if command.is_empty() {
+                    return Err(format!(
+                        "Recipe '{}' method '{}' has an empty stop command.",
+                        recipe_id, self.id
+                    ));
+                }
+            }
+        } else if self.service.is_some() {
+            // An unmanageable method may still carry metadata, but anything it
+            // declares must be well-formed.
+            self.effective_health().validate(recipe_id, &self.id)?;
         }
         let uninstall = self.uninstall.as_ref().ok_or_else(|| {
             format!(
@@ -1085,6 +1277,12 @@ impl Method {
         if let Some(service) = &self.service {
             if !service.command.is_empty() {
                 commands.push(&service.command);
+            }
+            if let Some(HealthCheck::Exec { command }) = &service.health {
+                commands.push(command);
+            }
+            if let StopSpec::Command { command } = &service.stop {
+                commands.push(command);
             }
         }
         if let Some(uninstall) = &self.uninstall {
@@ -1521,6 +1719,7 @@ fn npm_method(package: &NpmPackage) -> Method {
             image: None,
         }),
         service: None,
+        manageable: Some(false),
         uninstall: Some(Uninstall {
             keep_paths: Vec::new(),
             remove_paths: Vec::new(),
@@ -1627,13 +1826,19 @@ fn candidate_recipe(
             ));
         }
     }
-    if release_count > 0
-        && inference.and_then(|inference| inference.launch.as_ref()).is_none()
-    {
-        warnings.push(
+    // A launch executable is only a hint, never a verified start contract.
+    // Generated recipes are therefore unmanageable until a command has been
+    // configured and verified, and the preview must say so in both cases.
+    if !methods.is_empty() {
+        let has_launch_hint = inference
+            .and_then(|inference| inference.launch.as_ref())
+            .is_some();
+        warnings.push(if has_launch_hint {
+            "EasyAI found an executable but couldn't work out how to start this app as a long-running service. You can still install it, but Start/Stop won't work until a start command is configured and verified."
+        } else {
             "EasyAI couldn't work out how to start this app. You can still install it, but Start/Stop won't work until you add a start command to the recipe."
-                .to_string(),
-        );
+        }
+        .to_string());
     }
     if let Some(node) = npm.as_ref().and_then(|package| package.node.as_deref()) {
         warnings.push(format!(
@@ -1735,6 +1940,7 @@ fn release_method(repo: &str, platform: &str, asset: &str) -> Method {
             image: None,
         }),
         service: None,
+        manageable: Some(false),
         uninstall: Some(Uninstall {
             keep_paths: Vec::new(),
             remove_paths: Vec::new(),
@@ -2053,6 +2259,86 @@ mod tests {
         let recipe = parse(base_recipe());
         assert!(recipe.validate().is_ok());
         assert_eq!(recipe.methods.len(), 1);
+    }
+
+    #[test]
+    fn legacy_health_url_is_still_a_valid_start_contract() {
+        let recipe = parse(base_recipe());
+        assert!(recipe.validate().is_ok());
+        let method = &recipe.methods[0];
+        assert!(method.is_manageable());
+        assert_eq!(
+            method.effective_health(),
+            super::HealthCheck::Http {
+                url: "http://127.0.0.1:9999/health".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn generic_health_checks_are_supported() {
+        let valid = [
+            json!({"type": "exec", "command": ["demo", "status"]}),
+            json!({"type": "port", "port": 8080}),
+            json!({"type": "process"}),
+        ];
+        for health in valid {
+            let mut value = base_recipe();
+            value["methods"][0]["service"] = json!({
+                "command": ["demo", "serve"],
+                "health": health
+            });
+            assert!(parse(value).validate().is_ok());
+        }
+        let invalid = [
+            json!({"type": "http", "url": "ftp://example.com"}),
+            json!({"type": "exec", "command": []}),
+            json!({"type": "port", "port": 0}),
+        ];
+        for health in invalid {
+            let mut value = base_recipe();
+            value["methods"][0]["service"] = json!({
+                "command": ["demo", "serve"],
+                "health": health
+            });
+            assert!(parse(value).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn start_contracts_are_explicit() {
+        // No service and no override: legal, but not manageable.
+        let mut value = base_recipe();
+        value["methods"][0]["service"] = Value::Null;
+        value["methods"][0]["manageable"] = json!(false);
+        let recipe = parse(value);
+        assert!(recipe.validate().is_ok());
+        assert!(!recipe.methods[0].is_manageable());
+        assert!(recipe.methods[0].start_command().is_none());
+
+        // Declaring a manageable method without a start command is rejected.
+        let mut value = base_recipe();
+        value["methods"][0]["manageable"] = json!(true);
+        value["methods"][0]["service"] = json!({
+            "command": [],
+            "health": {"type": "process"}
+        });
+        assert!(parse(value)
+            .validate()
+            .unwrap_err()
+            .contains("missing a start command"));
+
+        // A daemonizing command needs an active health check to be tracked.
+        let mut value = base_recipe();
+        value["methods"][0]["service"] = json!({
+            "command": ["demo", "daemon", "start"],
+            "detach": "daemonize",
+            "health": {"type": "process"}
+        });
+        assert!(parse(value)
+            .validate()
+            .unwrap_err()
+            .contains("active health check"));
     }
 
     #[test]
@@ -2648,7 +2934,12 @@ mod tests {
         );
         assert_eq!(usage.cli.len(), 1);
         assert_eq!(usage.cli[0].label, "CLI help");
-        assert!(!warnings.iter().any(|warning| warning.contains("start this app")));
+        // A launch hint is not a verified start contract, so the preview must
+        // still warn and the generated method must not offer Start/Stop.
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains("long-running service")));
+        assert!(recipe.methods.iter().all(|method| !method.is_manageable()));
     }
 
     #[test]

@@ -160,9 +160,9 @@ export function ImportDialog({ onClose, onImported }: Props) {
                   <dd className="preview-mono">{currentAsset ?? '—'}</dd>
                   <dt>Start command</dt>
                   <dd className="preview-mono">
-                    {currentService
+                    {currentService?.command.length
                       ? currentService.command.join(' ')
-                      : 'Not inferred'}
+                      : 'Not inferred — configure and test one after install'}
                   </dd>
                 </>
               )}

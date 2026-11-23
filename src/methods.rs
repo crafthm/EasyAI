@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
+use std::net::TcpStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -9,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::catalog::{Method, MethodKind, Recipe, Service};
+use crate::catalog::{DetachMode, HealthCheck, Method, MethodKind, Recipe, StopSpec};
 use crate::db::InstalledApp;
 use crate::jobs::JobLogger;
 use crate::logging;
@@ -94,25 +95,9 @@ pub fn start(
             &HashMap::new(),
             log,
         )?;
-        return wait_for_health(ctx.method, log);
+        return wait_for_health(ctx, None, log, Duration::from_secs(30));
     }
-    let command = match launch_command {
-        Some(command) => expand_command(
-            command,
-            record,
-            &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
-        ),
-        None => match ctx.method.service.as_ref() {
-            Some(_) => service_command(ctx, record)?,
-            None => detect_launch_command(Path::new(&record.install_dir), &ctx.recipe.name)
-                .ok_or_else(|| {
-                    format!(
-                        "Method '{}' has no start command and no executable named after the app was found in {}.",
-                        ctx.method.id, record.install_dir
-                    )
-                })?,
-        },
-    };
+    let command = resolve_start_command(ctx, record, launch_command)?;
     let logs = probe::logs_dir(ctx.app_data);
     fs::create_dir_all(&logs)
         .map_err(|err| format!("Failed to create log directory: {err}"))?;
@@ -145,45 +130,199 @@ pub fn start(
         .spawn()
         .map_err(|err| format!("Failed to start {}: {err}", ctx.recipe.name))?;
     let pid = child.id() as i32;
-    // A process that exits right after spawning is not a running service.
-    // The usual case is a command-line tool that prints help and returns when
-    // run without arguments, so fail instead of recording a false success.
-    if let Some(status) = exited_during_grace(&mut child, Duration::from_millis(500))
-        .map_err(|err| format!("Failed to check whether {} started: {err}", ctx.recipe.name))?
-    {
-        // Prefer the process's own output; it usually states the real problem
-        // (missing auth, bad flags) better than a generic guess.
-        let message = match last_log_line(&service_log) {
-            Some(line) => format!(
-                "{} exited immediately ({status}): {line}. See {}.",
-                ctx.recipe.name,
-                service_log.display()
-            ),
-            None => format!(
-                "{} exited immediately ({status}). It may be a command-line tool that does not stay running in the background. See {}.",
-                ctx.recipe.name,
-                service_log.display()
-            ),
-        };
-        return Err(message);
-    }
-    std::thread::spawn(move || {
+    if let Err(err) = wait_until_ready(ctx, record, log, &mut child, &service_log) {
+        // A failed start must not leave a stray process group behind. Only
+        // signal a live child, so a reused PID can never be targeted.
+        if child.try_wait().ok().flatten().is_none() {
+            unsafe {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
         let _ = child.wait();
-    });
-    write_pid(ctx.app_data, &ctx.recipe.id, pid)?;
-    log.log(format!("Started process {pid}."));
-    if ctx.method.service.is_some() {
-        wait_for_health(ctx.method, log)?;
-        log.log("Health check passed.");
+        return Err(err);
+    }
+    if child
+        .try_wait()
+        .map_err(|err| format!("Failed to check {}: {err}", ctx.recipe.name))?
+        .is_none()
+    {
+        write_pid(ctx.app_data, &ctx.recipe.id, pid)?;
+        log.log(format!("Started process {pid}."));
+        std::thread::spawn(move || {
+            let _ = child.wait();
+        });
     } else {
-        log.log("Started without health monitoring.");
+        let _ = fs::remove_file(probe::pid_path(ctx.app_data, &ctx.recipe.id));
+        log.log("Started as a self-daemonizing process; status is tracked by its health check.");
     }
     Ok(())
 }
 
+/// Start commands come from an explicit contract only. Guessing a bare
+/// executable is what made one-shot CLIs look like running services.
+fn resolve_start_command(
+    ctx: &MethodContext<'_>,
+    record: &InstalledApp,
+    launch_command: Option<&[String]>,
+) -> Result<Vec<String>, String> {
+    let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
+    if let Some(command) = launch_command.filter(|command| !command.is_empty()) {
+        return Ok(expand_command(command, record, &app_dir));
+    }
+    if let Some(command) = ctx.method.start_command() {
+        return Ok(expand_command(command, record, &app_dir));
+    }
+    Err(format!(
+        "{} has no verified start command, so Start is unavailable. Configure a long-running command in the Start command field (for example \"{{install_dir}}/app serve\") and test it first. An executable in the install directory is not a service by itself.",
+        ctx.recipe.name
+    ))
+}
+
+/// Waits for a start to become ready, and turns an early exit into an
+/// actionable diagnosis instead of a generic "exited immediately".
+fn wait_until_ready(
+    ctx: &MethodContext<'_>,
+    record: &InstalledApp,
+    log: &mut JobLogger,
+    child: &mut Child,
+    service_log: &Path,
+) -> Result<(), String> {
+    let health = ctx.method.effective_health();
+    let detach = ctx.method.detach_mode();
+    let timeout = Duration::from_millis(ctx.method.ready_timeout_ms());
+    // Process-only checks just need a short grace; an active check may need
+    // the full readiness timeout to come up.
+    let grace = timeout.min(Duration::from_millis(500));
+    let active = health.is_active();
+    let started = Instant::now();
+    let mut exited: Option<ExitStatus> = None;
+
+    loop {
+        if exited.is_none() {
+            exited = child
+                .try_wait()
+                .map_err(|err| format!("Failed to check whether {} started: {err}", ctx.recipe.name))?;
+        }
+        let alive = exited.is_none();
+        let healthy = match &health {
+            HealthCheck::Process | HealthCheck::None => alive,
+            other => check_health(other, ctx, record),
+        };
+
+        if let Some(status) = exited {
+            if detach != DetachMode::Daemonize {
+                return Err(diagnose_early_exit(ctx, status, service_log));
+            }
+            if !active {
+                return Err(format!(
+                    "{} daemonized but declares no active health check, so its status cannot be tracked.",
+                    ctx.recipe.name
+                ));
+            }
+        }
+        if healthy && started.elapsed() >= grace {
+            if active {
+                log.log(format!("Health check passed ({}).", health.label()));
+            } else {
+                log.log("Started without health monitoring.");
+            }
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            log.log("Health check timed out.");
+            return Err(format!(
+                "{} did not become healthy within {} ms using its {} health check.",
+                ctx.recipe.name,
+                timeout.as_millis(),
+                health.label()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EarlyExitKind {
+    OneShotCli,
+    AuthRequired,
+    Crashed,
+    Unknown,
+}
+
+pub(crate) fn classify_early_exit(status: ExitStatus, text: &str) -> EarlyExitKind {
+    let lower = text.to_ascii_lowercase();
+    let looks_like_help = lower.lines().any(|line| {
+        let line = line.trim();
+        line == "usage" || line.starts_with("usage ") || line.starts_with("usage:")
+    }) || (lower.contains("--help") && lower.contains("command"));
+    let needs_auth = [
+        "not logged in",
+        "unauthorized",
+        "authentication required",
+        "please log in",
+        "run `login`",
+        "no credentials",
+        "not authenticated",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    if needs_auth {
+        EarlyExitKind::AuthRequired
+    } else if status.success() && looks_like_help {
+        EarlyExitKind::OneShotCli
+    } else if !status.success() {
+        EarlyExitKind::Crashed
+    } else {
+        EarlyExitKind::Unknown
+    }
+}
+
+/// A few leading lines say much more than the last line of a help screen.
+pub(crate) fn log_excerpt(path: &Path) -> String {
+    let Ok(content) = fs::read_to_string(path) else {
+        return String::new();
+    };
+    let excerpt: Vec<&str> = content
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(3)
+        .collect();
+    let joined = excerpt.join(" | ");
+    joined.chars().take(300).collect()
+}
+
+fn diagnose_early_exit(
+    ctx: &MethodContext<'_>,
+    status: ExitStatus,
+    service_log: &Path,
+) -> String {
+    let text = fs::read_to_string(service_log).unwrap_or_default();
+    let excerpt = log_excerpt(service_log);
+    let detail = if excerpt.is_empty() {
+        String::new()
+    } else {
+        format!(" Output: {excerpt}.")
+    };
+    let advice = match classify_early_exit(status, &text) {
+        EarlyExitKind::OneShotCli => " It printed its command-line help, so it is a one-shot CLI rather than a long-running service. Configure a start command that stays in the foreground (often a `serve`/`daemon start --foreground` subcommand) and test it.",
+        EarlyExitKind::AuthRequired => " It appears to need authentication or first-time setup. Run its login/setup command before starting it here.",
+        EarlyExitKind::Crashed => " Check the service log for the failure and adjust the start command or its environment.",
+        EarlyExitKind::Unknown => " It may be a command-line tool that does not stay running in the background; configure a long-running start command.",
+    };
+    format!(
+        "{} exited immediately ({status}).{detail}{advice} See {}.",
+        ctx.recipe.name,
+        service_log.display()
+    )
+}
+
 /// Waits up to `grace` for the child to exit. Returns its status when it died
 /// during the grace period, or `None` when it is still running afterwards.
-fn exited_during_grace(child: &mut Child, grace: Duration) -> io::Result<Option<ExitStatus>> {
+pub(crate) fn exited_during_grace(
+    child: &mut Child,
+    grace: Duration,
+) -> io::Result<Option<ExitStatus>> {
     let deadline = Instant::now() + grace;
     loop {
         if let Some(status) = child.try_wait()? {
@@ -196,25 +335,14 @@ fn exited_during_grace(child: &mut Child, grace: Duration) -> io::Result<Option<
     }
 }
 
-/// The last non-empty line written to a service log, trimmed to keep error
-/// messages readable.
-fn last_log_line(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let line = content.lines().rev().find(|line| !line.trim().is_empty())?;
-    let trimmed = line.trim();
-    Some(trimmed.chars().take(300).collect())
-}
-
-/// Finds the app's own executable inside an install directory for methods that
-/// declare no start command. Only name-matching binaries are considered, so a
-/// bundled helper is not launched by accident.
-fn detect_launch_command(install_dir: &Path, app_name: &str) -> Option<Vec<String>> {
+/// Executables in an install directory, best name match first. These are
+/// *candidates* for start-command detection, never commands to run directly.
+pub(crate) fn launch_executables(install_dir: &Path, app_name: &str) -> Vec<PathBuf> {
     let wanted = app_name.trim().to_ascii_lowercase();
     if wanted.is_empty() {
-        return None;
+        return Vec::new();
     }
-
-    let mut best: Option<(u32, PathBuf)> = None;
+    let mut scored: Vec<(u32, PathBuf)> = Vec::new();
     walk_executables(install_dir, 0, &mut |path| {
         let stem = path
             .file_stem()
@@ -234,13 +362,10 @@ fn detect_launch_command(install_dir: &Path, app_name: &str) -> Option<Vec<Strin
         } else {
             return;
         };
-        let score = named * 1000 + path.components().count() as u32;
-        if best.as_ref().is_none_or(|(current, _)| score < *current) {
-            best = Some((score, path.to_path_buf()));
-        }
+        scored.push((named * 1000 + path.components().count() as u32, path.to_path_buf()));
     });
-
-    best.map(|(_, path)| vec![path.to_string_lossy().to_string()])
+    scored.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+    scored.into_iter().map(|(_, path)| path).collect()
 }
 
 fn walk_executables(dir: &Path, depth: usize, visit: &mut impl FnMut(&Path)) {
@@ -277,13 +402,15 @@ fn walk_executables(dir: &Path, depth: usize, visit: &mut impl FnMut(&Path)) {
     }
 }
 
+/// Only actively polled checks count as health monitoring; PID liveness is
+/// already covered by `is_running`.
 pub fn has_health(method: &Method) -> bool {
-    method.service.is_some()
+    method.is_manageable() && method.effective_health().is_active()
 }
 
 pub fn stop(
     ctx: &MethodContext<'_>,
-    _record: &InstalledApp,
+    record: &InstalledApp,
     log: &mut JobLogger,
 ) -> Result<(), String> {
     if ctx.method.kind == MethodKind::Container {
@@ -297,7 +424,12 @@ pub fn stop(
         log.log("Container stopped.");
         return Ok(());
     }
-    if let Some(pid) = read_pid(ctx.app_data, &ctx.recipe.id) {
+    if let StopSpec::Command { command } = ctx.method.stop_spec() {
+        let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
+        let command = expand_command(command, record, &app_dir);
+        run_command(&command, None, &service_env(ctx.method), log)?;
+        log.log("Stop command completed.");
+    } else if let Some(pid) = read_pid(ctx.app_data, &ctx.recipe.id) {
         if process_alive(pid) {
             log.log(format!("Stopping process {pid}."));
             unsafe {
@@ -313,8 +445,8 @@ pub fn stop(
                 }
             }
         }
-        let _ = fs::remove_file(probe::pid_path(ctx.app_data, &ctx.recipe.id));
     }
+    let _ = fs::remove_file(probe::pid_path(ctx.app_data, &ctx.recipe.id));
     log.log("Stopped.");
     Ok(())
 }
@@ -427,12 +559,19 @@ pub fn uninstall(
     Ok(())
 }
 
-pub fn health(method: &Method) -> bool {
-    method
-        .service
-        .as_ref()
-        .map(|service| health_service(service))
-        .unwrap_or(false)
+/// Health check with the installation context needed to expand `{install_dir}`
+/// in exec checks and to pass the declared environment.
+pub fn health_for(method: &Method, record: &InstalledApp, app_data: &Path) -> bool {
+    match method.effective_health() {
+        HealthCheck::Http { url } => health_http(&url),
+        HealthCheck::Port { port } => TcpStream::connect(("127.0.0.1", port)).is_ok(),
+        HealthCheck::Exec { command } => {
+            let app_dir = probe::app_dir(app_data, None, &record.app_id);
+            let command = expand_command(&command, record, &app_dir);
+            run_exec_health(&command, &service_env(method))
+        }
+        HealthCheck::Process | HealthCheck::None => true,
+    }
 }
 
 pub fn is_running(method: &Method, record: &InstalledApp, app_data: &Path) -> bool {
@@ -455,9 +594,17 @@ pub fn is_running(method: &Method, record: &InstalledApp, app_data: &Path) -> bo
             })
             .unwrap_or(false);
     }
-    read_pid(app_data, &record.app_id)
+    if read_pid(app_data, &record.app_id)
         .map(process_alive)
         .unwrap_or(false)
+    {
+        return true;
+    }
+    // A self-daemonizing start leaves no live PID to track; its active health
+    // check is the only reliable liveness signal.
+    method.detach_mode() == DetachMode::Daemonize
+        && has_health(method)
+        && health_for(method, record, app_data)
 }
 
 fn install_release(
@@ -597,7 +744,7 @@ fn install_container(
     let command = container_run_command(ctx.method, &runtime, &name, &image_ref);
     run_command(&command, None, &HashMap::new(), log)?;
     let app = installed(ctx, image_ref.clone(), name.clone());
-    wait_for_health(ctx.method, log)?;
+    wait_for_health(ctx, Some(&app), log, Duration::from_secs(30))?;
     log.log(format!("Started container {name}."));
     Ok(app)
 }
@@ -1071,14 +1218,11 @@ fn installed(ctx: &MethodContext<'_>, version: String, install_dir: String) -> I
 fn verify_binary(ctx: &MethodContext<'_>, app: &InstalledApp, log: &mut JobLogger) -> Result<(), String> {
     // Recipes without a managed service have no command to probe; skipping
     // verification must not fail the install.
-    let Some(service) = ctx.method.service.as_ref() else {
+    let Some(service_command) = ctx.method.start_command() else {
         return Ok(());
     };
-    if service.command.is_empty() {
-        return Ok(());
-    }
     let command = expand_command(
-        &service.command,
+        service_command,
         app,
         &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
     );
@@ -1090,22 +1234,6 @@ fn verify_binary(ctx: &MethodContext<'_>, app: &InstalledApp, log: &mut JobLogge
     )?;
     log.log(format!("Version check: {}", output.trim()));
     Ok(())
-}
-
-fn service_command(ctx: &MethodContext<'_>, record: &InstalledApp) -> Result<Vec<String>, String> {
-    let service = ctx
-        .method
-        .service
-        .as_ref()
-        .ok_or_else(|| format!("Method '{}' has no service command.", ctx.method.id))?;
-    if service.command.is_empty() {
-        return Err(format!("Method '{}' has no start command.", ctx.method.id));
-    }
-    Ok(expand_command(
-        &service.command,
-        record,
-        &probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id),
-    ))
 }
 
 fn expand_command(command: &[String], record: &InstalledApp, app_dir: &Path) -> Vec<String> {
@@ -1144,25 +1272,35 @@ fn service_env(method: &Method) -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
-fn wait_for_health(method: &Method, log: &mut JobLogger) -> Result<(), String> {
-    let Some(service) = &method.service else {
-        return Ok(());
-    };
-    let deadline = Instant::now() + Duration::from_secs(30);
-    while Instant::now() < deadline {
-        if health_service(service) {
-            return Ok(());
+fn check_health(health: &HealthCheck, ctx: &MethodContext<'_>, record: &InstalledApp) -> bool {
+    match health {
+        HealthCheck::Http { url } => health_http(url),
+        HealthCheck::Port { port } => TcpStream::connect(("127.0.0.1", *port)).is_ok(),
+        HealthCheck::Exec { command } => {
+            let app_dir = probe::app_dir(ctx.app_data, ctx.install_root, &ctx.recipe.id);
+            let command = expand_command(command, record, &app_dir);
+            run_exec_health(&command, &service_env(ctx.method))
         }
-        std::thread::sleep(Duration::from_millis(250));
+        HealthCheck::Process | HealthCheck::None => true,
     }
-    log.log("Health check timed out.");
-    Err(format!(
-        "{} did not become healthy within 30 seconds.",
-        service.health_url
-    ))
 }
 
-fn health_service(service: &Service) -> bool {
+fn run_exec_health(command: &[String], env: &HashMap<String, String>) -> bool {
+    if command.is_empty() {
+        return false;
+    }
+    Command::new(&command[0])
+        .args(&command[1..])
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn health_http(url: &str) -> bool {
     let Ok(client) = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(1))
         .build()
@@ -1170,10 +1308,47 @@ fn health_service(service: &Service) -> bool {
         return false;
     };
     client
-        .get(&service.health_url)
+        .get(url)
         .send()
         .map(|response| response.status().is_success())
         .unwrap_or(false)
+}
+
+fn wait_for_health(
+    ctx: &MethodContext<'_>,
+    record: Option<&InstalledApp>,
+    log: &mut JobLogger,
+    timeout: Duration,
+) -> Result<(), String> {
+    let health = ctx.method.effective_health();
+    if !health.is_active() {
+        return Ok(());
+    }
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        let ok = match (&health, record) {
+            (HealthCheck::Http { url }, _) => health_http(url),
+            (HealthCheck::Port { port }, _) => {
+                TcpStream::connect(("127.0.0.1", *port)).is_ok()
+            }
+            (HealthCheck::Exec { .. }, Some(record)) => check_health(&health, ctx, record),
+            (HealthCheck::Exec { command }, None) => {
+                run_exec_health(command, &service_env(ctx.method))
+            }
+            _ => true,
+        };
+        if ok {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    log.log("Health check timed out.");
+    Err(format!(
+        "{} did not become healthy within {} seconds using its {} health check.",
+        ctx.recipe.name,
+        timeout.as_secs(),
+        health.label()
+    ))
 }
 
 fn write_pid(app_data: &Path, app_id: &str, pid: i32) -> Result<(), String> {
@@ -1622,11 +1797,82 @@ fn normalize_version(tag: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        container_image, container_run_command, detect_launch_command, exited_during_grace,
-        expand_command, manager_install, manager_uninstall, read_bom, write_bom, Bom,
+        classify_early_exit, container_image, container_run_command, exited_during_grace,
+        expand_command, launch_executables, manager_install, manager_uninstall, read_bom,
+        resolve_start_command, write_bom, Bom, EarlyExitKind, MethodContext,
     };
-    use crate::catalog::{ImageSpec, Method, MethodKind};
+    use crate::catalog::{ImageSpec, Method, MethodKind, Recipe};
+    use crate::db::InstalledApp;
     use serde_json::json;
+
+    #[test]
+    fn start_requires_an_explicit_contract() {
+        let recipe: Recipe = serde_json::from_value(json!({
+            "id": "demo",
+            "name": "Demo",
+            "platforms": ["linux-x86_64"]
+        }))
+        .unwrap();
+        let method: Method = serde_json::from_value(json!({
+            "id": "release",
+            "kind": "release",
+            "version": {"type": "github-release", "repo": "owner/repo"},
+            "service": null,
+            "manageable": false,
+            "uninstall": {"keep_paths": []}
+        }))
+        .unwrap();
+        let record = InstalledApp {
+            app_id: "demo".to_string(),
+            version: "1".to_string(),
+            install_dir: "/tmp/demo".to_string(),
+            method: "release".to_string(),
+            state: "stopped".to_string(),
+            managed: true,
+            method_id: Some("release".to_string()),
+            method_kind: Some("release".to_string()),
+            provenance_json: None,
+            bom_path: None,
+        };
+        let dir = std::env::temp_dir();
+        let ctx = MethodContext {
+            recipe: &recipe,
+            method: &method,
+            app_data: &dir,
+            install_root: None,
+            platform: "linux-x86_64",
+        };
+        // A bare executable is never guessed as a start command.
+        assert!(resolve_start_command(&ctx, &record, None)
+            .unwrap_err()
+            .contains("no verified start command"));
+        // An explicit override is expanded and accepted.
+        let override_command = vec![
+            "{install_dir}/demo".to_string(),
+            "serve".to_string(),
+        ];
+        assert_eq!(
+            resolve_start_command(&ctx, &record, Some(&override_command)).unwrap(),
+            vec!["/tmp/demo/demo".to_string(), "serve".to_string()]
+        );
+    }
+
+    #[test]
+    fn early_exit_diagnosis_is_generic() {
+        let ok = std::process::Command::new("true").status().unwrap();
+        let failed = std::process::Command::new("sh")
+            .args(["-c", "exit 2"])
+            .status()
+            .unwrap();
+        let help = "Work with things.\n\nUSAGE\n  tool <command> <subcommand>\n\nFLAGS\n  --help\n";
+        assert_eq!(classify_early_exit(ok, help), EarlyExitKind::OneShotCli);
+        assert_eq!(classify_early_exit(ok, "done"), EarlyExitKind::Unknown);
+        assert_eq!(classify_early_exit(failed, "boom"), EarlyExitKind::Crashed);
+        assert_eq!(
+            classify_early_exit(ok, "Not logged in, please log in first"),
+            EarlyExitKind::AuthRequired
+        );
+    }
 
     #[test]
 fn detects_launch_binary_by_app_name() {
@@ -1645,8 +1891,8 @@ fn detects_launch_binary_by_app_name() {
     std::fs::set_permissions(&binary, permissions).unwrap();
     std::fs::write(dir.join("BeefTV-linux/README.md"), b"readme").unwrap();
 
-    let command = detect_launch_command(&dir, "BeefTV").unwrap();
-    assert!(command[0].ends_with("BeefTV-linux/BeefTV"));
+    let executables = launch_executables(&dir, "BeefTV");
+    assert!(executables[0].ends_with("BeefTV-linux/BeefTV"));
 
     std::fs::remove_dir_all(&dir).unwrap();
 }

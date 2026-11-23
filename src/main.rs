@@ -13,6 +13,7 @@ mod methods;
 mod probe;
 mod proxy;
 mod resolve;
+mod start_detect;
 mod tools;
 mod update;
 mod usage;
@@ -184,6 +185,9 @@ fn main() {
             commands::import_recipe,
             commands::remove_app,
             commands::save_start_command,
+            commands::detect_start_commands,
+            commands::test_start_command,
+            commands::apply_start_contract,
             commands::preview_bundle,
             commands::import_bundle,
             commands::export_bundle,

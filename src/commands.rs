@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -6,7 +7,9 @@ use tauri::{AppHandle, State};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::bundle::BundleEntry;
-use crate::catalog::{self, Method, Recipe, RecipePreview};
+use crate::catalog::{
+    self, DetachMode, HealthCheck, Method, Provenance, Recipe, RecipePreview, Service, StopSpec,
+};
 use crate::db::{self, JobRecord};
 use crate::jobs::{self, JobLogger, Phase};
 use crate::lanscan::{self, LanScanResult, SshCredentials};
@@ -522,6 +525,119 @@ pub async fn save_start_command(
     })
     .await
     .map_err(|err| format!("Failed to save the start command: {err}"))?
+}
+
+/// Suggests long-running start commands for an installed app by inspecting
+/// the help output of its executables. Nothing here is stored automatically.
+#[tauri::command]
+pub async fn detect_start_commands(
+    state: State<'_, AppState>,
+    app_id: String,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<Vec<crate::start_detect::StartCandidate>, String> {
+    authorize("detect_start_commands", origin, confirmed)?;
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (recipe, _, record) = installed_context(&db_path, &app_data, &app_id)?;
+        Ok(crate::start_detect::detect_candidates(
+            Path::new(&record.install_dir),
+            &recipe.name,
+        ))
+    })
+    .await
+    .map_err(|err| format!("Failed to detect start commands: {err}"))?
+}
+
+/// Verifies a candidate start command in a bounded sandbox. The UI only
+/// offers to save commands that passed this check.
+#[tauri::command]
+pub async fn test_start_command(
+    state: State<'_, AppState>,
+    app_id: String,
+    command: Vec<String>,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<crate::start_detect::StartVerification, String> {
+    authorize("test_start_command", origin, confirmed)?;
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    let install_root = state.install_root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (_, _, record) = installed_context(&db_path, &app_data, &app_id)?;
+        let app_dir = probe::app_dir(&app_data, install_root.as_deref(), &app_id);
+        crate::start_detect::verify_command(&command, &record.install_dir, &app_dir)
+    })
+    .await
+    .map_err(|err| format!("Failed to test the start command: {err}"))?
+}
+
+/// Persists a verified start contract into an imported recipe, so the health
+/// check, detach mode and provenance travel with the app instead of living in
+/// a UI-only override.
+#[tauri::command]
+pub async fn apply_start_contract(
+    state: State<'_, AppState>,
+    app_id: String,
+    command: Vec<String>,
+    health: HealthCheck,
+    detach: DetachMode,
+    stop_command: Option<Vec<String>>,
+    origin: Option<String>,
+    confirmed: Option<bool>,
+) -> Result<(), String> {
+    authorize("apply_start_contract", origin, confirmed)?;
+    let db_path = state.db_path.clone();
+    let app_data = state.app_data_dir.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if catalog::find(&app_data, &app_id)?.source.is_none() {
+            return Err(
+                "Bundled recipes cannot be edited; use the Start command override instead."
+                    .to_string(),
+            );
+        }
+        let (mut recipe, method, _) = installed_context(&db_path, &app_data, &app_id)?;
+        let command: Vec<String> = command
+            .into_iter()
+            .map(|part| part.trim().to_string())
+            .filter(|part| !part.is_empty())
+            .collect();
+        if command.is_empty() {
+            return Err("The start command is empty.".to_string());
+        }
+        let target = recipe
+            .methods
+            .iter_mut()
+            .find(|item| item.id == method.id)
+            .ok_or_else(|| "The installed method is no longer in the recipe.".to_string())?;
+        target.manageable = Some(true);
+        let stop = match stop_command {
+            Some(command) if !command.is_empty() => StopSpec::Command { command },
+            _ => StopSpec::ProcessGroup,
+        };
+        target.service = Some(Service {
+            command,
+            health_url: String::new(),
+            env: HashMap::new(),
+            health: Some(health),
+            ready_timeout_ms: None,
+            detach,
+            stop,
+            provenance: Some(Provenance {
+                source: "user".to_string(),
+                confidence: "high".to_string(),
+                verified: true,
+            }),
+        });
+        recipe.validate()?;
+        catalog::update_imported_recipe(&app_data, &recipe)?;
+        db::set_start_command(&db_path, &app_id, &[])
+            .map_err(|err| format!("Failed to clear the old start override: {err}"))?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("Failed to apply the start contract: {err}"))?
 }
 
 #[tauri::command]

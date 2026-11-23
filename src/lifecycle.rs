@@ -6,7 +6,7 @@ use std::path::Path;
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::catalog::{Method, Recipe};
+use crate::catalog::{Method, MethodKind, Recipe};
 use crate::db::{self, InstalledApp};
 use crate::jobs::{self, JobLogger, JobManager};
 use crate::methods::{self, MethodContext};
@@ -28,6 +28,10 @@ pub struct AppSummary {
     pub source_url: Option<String>,
     pub method_id: Option<String>,
     pub method_kind: Option<String>,
+    /// Whether a verified long-running start command is available.
+    pub startable: bool,
+    /// Why Start is unavailable, shown next to the start-command editor.
+    pub start_reason: Option<String>,
     /// Newest published version when it is newer than the installed one, taken
     /// from the cached update status so listing stays offline.
     pub update_available: Option<String>,
@@ -49,6 +53,8 @@ pub struct AppDetail {
     pub method_id: Option<String>,
     pub method_kind: Option<String>,
     pub managed: bool,
+    pub startable: bool,
+    pub start_reason: Option<String>,
     pub health_ok: bool,
     pub health_monitored: bool,
     pub source_url: Option<String>,
@@ -57,6 +63,29 @@ pub struct AppDetail {
     pub usage: Option<crate::catalog::Usage>,
     /// A user-configured start command that overrides the recipe's default.
     pub start_command: Option<Vec<String>>,
+}
+
+/// Start is only offered when an explicit, long-running start contract exists.
+/// A user override counts as one; an inferred `usage.launch` does not.
+pub fn start_status(
+    db_path: &Path,
+    recipe: &Recipe,
+    record: Option<&InstalledApp>,
+) -> (bool, Option<String>) {
+    let reason = "No verified long-running start command. Detect one from the installed executable or enter one in the Start command field.";
+    let Some(record) = record else {
+        return (false, Some("Install the app before configuring a start command.".to_string()));
+    };
+    let Some(method) = method_for(recipe, record) else {
+        return (false, Some("No install method is available for this app.".to_string()));
+    };
+    if method.kind == MethodKind::Container {
+        return (true, None);
+    }
+    if db::start_command(db_path, &recipe.id).is_some() || method.start_command().is_some() {
+        return (true, None);
+    }
+    (false, Some(reason.to_string()))
 }
 
 pub fn list_apps(
@@ -68,7 +97,8 @@ pub fn list_apps(
         let Some(method) = method_for(recipe, record) else {
             return (false, None);
         };
-        let health = methods::has_health(method).then(|| methods::health(method));
+        let health = methods::has_health(method)
+            .then(|| methods::health_for(method, record, app_data));
         (methods::is_running(method, record, app_data), health)
     })
 }
@@ -104,6 +134,7 @@ fn list_apps_with(
             let recipe = entry.recipe;
             let source_url = entry.source.map(|source| source.url);
             let record = installed.get(&recipe.id);
+            let (startable, start_reason) = start_status(db_path, &recipe, record);
             let (state, version, managed, method_id, method_kind) =
                 match jobs.phase(&recipe.id) {
                     Some(phase) => (
@@ -163,6 +194,8 @@ fn list_apps_with(
                 source_url,
                 method_id,
                 method_kind,
+                startable,
+                start_reason,
                 update_available,
             }
         })
@@ -188,12 +221,19 @@ pub fn get_app_detail(
         .or_else(|| recipe.usage.clone());
 
     let health_monitored = method.is_some_and(methods::has_health);
-    let healthy = health_monitored.then(|| method.is_some_and(methods::health));
+    let healthy = health_monitored.then(|| {
+        record
+            .as_ref()
+            .zip(method)
+            .map(|(record, method)| methods::health_for(method, record, app_data))
+            .unwrap_or(false)
+    });
     let running = record
         .as_ref()
         .zip(method)
         .map(|(record, method)| methods::is_running(method, record, app_data))
         .unwrap_or(false);
+    let (startable, start_reason) = start_status(db_path, &recipe, record.as_ref());
     let (state, managed) = match (&record, jobs.phase(app_id)) {
         (_, Some(phase)) => (phase.state().to_string(), true),
         (Some(app), None) => reconcile(Some(app), running, healthy),
@@ -220,6 +260,8 @@ pub fn get_app_detail(
         method_id: record.as_ref().and_then(|app| app.method_id.clone()),
         method_kind: record.as_ref().and_then(|app| app.method_kind.clone()),
         managed,
+        startable,
+        start_reason,
         health_ok: healthy.unwrap_or(false),
         health_monitored,
         source_url,
@@ -266,7 +308,8 @@ pub fn refresh_states(
         let Some(method) = method_for(&recipe.recipe, &record) else {
             continue;
         };
-        let health = methods::has_health(method).then(|| methods::health(method));
+        let health = methods::has_health(method)
+            .then(|| methods::health_for(method, &record, app_data));
         let (state, managed) = reconcile(
             Some(&record),
             methods::is_running(method, &record, app_data),
@@ -344,11 +387,6 @@ pub fn start(
             db::update_installed_state(db_path, &recipe.id, "running", true)
                 .map_err(|err| format!("Failed to update application state: {err}"))?;
             jobs::emit_state(app, &recipe.id, "running", Some(&record.version), true);
-            if method.service.is_some() {
-                log.log("Health check passed.");
-            } else {
-                log.log("Started without health monitoring.");
-            }
             Ok(())
         }
         Err(err) => {
@@ -448,7 +486,7 @@ pub fn method_for<'a>(recipe: &'a Recipe, record: &InstalledApp) -> Option<&'a M
 
 #[cfg(test)]
 mod tests {
-    use super::{list_apps_with, reconcile};
+    use super::{list_apps_with, reconcile, start_status};
     use crate::db::{self, InstalledApp};
     use crate::jobs::JobManager;
 
@@ -465,6 +503,49 @@ mod tests {
             provenance_json: None,
             bom_path: None,
         }
+    }
+
+    #[test]
+    fn start_status_requires_a_verified_contract() {
+        let dir = std::env::temp_dir().join(format!(
+            "easyai-start-status-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("state.db");
+        db::init(&db_path).unwrap();
+        let recipe: crate::catalog::Recipe = serde_json::from_value(serde_json::json!({
+            "id": "demo",
+            "name": "Demo",
+            "platforms": ["linux-x86_64"],
+            "methods": [{
+                "id": "release",
+                "kind": "release",
+                "version": {"type": "github-release", "repo": "o/r"},
+                "service": null,
+                "manageable": false,
+                "uninstall": {"keep_paths": []},
+                "source": {"repo": "o/r", "asset": {"linux-x86_64": "demo.tar.gz"}}
+            }]
+        }))
+        .unwrap();
+        let mut app = record();
+        app.app_id = "demo".to_string();
+        app.method_id = Some("release".to_string());
+
+        let (startable, reason) = start_status(&db_path, &recipe, Some(&app));
+        assert!(!startable);
+        assert!(reason.unwrap().contains("long-running"));
+
+        db::set_start_command(
+            &db_path,
+            "demo",
+            &["demo".to_string(), "serve".to_string()],
+        )
+        .unwrap();
+        assert!(start_status(&db_path, &recipe, Some(&app)).0);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

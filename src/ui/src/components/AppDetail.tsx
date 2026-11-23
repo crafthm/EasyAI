@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { UnlistenFn } from '@tauri-apps/api/event'
 import {
+  applyStartContract,
+  detectStartCommands,
   discoverUsage,
   getAppDetail,
   getJobLog,
@@ -18,10 +20,13 @@ import {
   reportUiError,
   runUsageCheck,
   saveStartCommand,
+  testStartCommand,
   uninstallApp,
   type AppDetail as AppDetailData,
   type DetectedEntry,
   type JobRecord,
+  type StartCandidate,
+  type StartVerification,
   type UpdateStatus,
   type UsageReport,
 } from '../api/apps'
@@ -71,6 +76,8 @@ type Props = {
   onCatalogChanged: () => void
   onPrimaryAction: (appId: string) => void
   onUpgrade: (appId: string) => void
+  /** Focus the start-command editor when Start is unavailable. */
+  focusStartCommand?: boolean
 }
 
 export function AppDetail({
@@ -79,6 +86,7 @@ export function AppDetail({
   onCatalogChanged,
   onPrimaryAction,
   onUpgrade,
+  focusStartCommand = false,
 }: Props) {
   const [detail, setDetail] = useState<AppDetailData | null>(null)
   const [jobs, setJobs] = useState<JobRecord[]>([])
@@ -96,6 +104,17 @@ export function AppDetail({
   const [reanalyzing, setReanalyzing] = useState(false)
   const [update, setUpdate] = useState<UpdateStatus | null>(null)
   const [startCommandInput, setStartCommandInput] = useState('')
+  const startInputRef = useRef<HTMLInputElement | null>(null)
+  const [candidates, setCandidates] = useState<StartCandidate[]>([])
+  const [detecting, setDetecting] = useState(false)
+  const [verification, setVerification] = useState<StartVerification | null>(null)
+
+  useEffect(() => {
+    if (focusStartCommand && detail) {
+      startInputRef.current?.focus()
+      startInputRef.current?.scrollIntoView({ block: 'center' })
+    }
+  }, [focusStartCommand, detail])
 
   useEffect(() => {
     let disposed = false
@@ -311,21 +330,88 @@ export function AppDetail({
     }
   }
 
+  function currentStartCommand(): string[] {
+    return startCommandInput.trim()
+      ? startCommandInput.trim().split(/\s+/)
+      : []
+  }
+
   async function handleSaveStartCommand() {
     if (!detail) return
+    const command = currentStartCommand()
+    if (command.length === 0) {
+      setError('Enter a start command to save.')
+      return
+    }
+    if (!verification?.ok) {
+      setError('Test the start command successfully before saving it.')
+      return
+    }
     setBusy(true)
     setError(null)
     try {
-      const command = startCommandInput.trim()
-        ? startCommandInput.trim().split(/\s+/)
-        : []
-      await saveStartCommand(appId, command)
+      const candidate = candidates.find(
+        (item) => item.command.join(' ') === command.join(' '),
+      )
+      const health = candidate?.health ?? { type: 'process' as const }
+      const detach = candidate?.detach ?? ('foreground' as const)
+      if (detail.sourceUrl) {
+        // Persist the whole verified contract in the imported recipe.
+        await applyStartContract(
+          appId,
+          command,
+          health,
+          detach,
+          candidate?.stopCommand ?? null,
+        )
+      } else {
+        // Bundled recipes are read-only; the override is the contract.
+        await saveStartCommand(appId, command)
+      }
+      setVerification(null)
       setDetail(await getAppDetail(appId))
+      onCatalogChanged()
     } catch (err) {
       setError(String(err))
     } finally {
       setBusy(false)
     }
+  }
+
+  async function handleDetectStartCommands() {
+    setDetecting(true)
+    setError(null)
+    setVerification(null)
+    try {
+      setCandidates(await detectStartCommands(appId))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setDetecting(false)
+    }
+  }
+
+  async function handleTestStartCommand() {
+    const command = currentStartCommand()
+    if (command.length === 0) {
+      setError('Enter a start command to test.')
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      setVerification(await testStartCommand(appId, command))
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function handleApplyCandidate(candidate: StartCandidate) {
+    setStartCommandInput(candidate.command.join(' '))
+    setVerification(null)
+    startInputRef.current?.focus()
   }
 
   async function handleRemoveApp() {
@@ -483,19 +569,25 @@ export function AppDetail({
               <div className="plan-section">
                 <h3 className="detail-section-title">Start command</h3>
                 <p className="detail-description">
-                  Optional. Overrides the command the Start action runs. Use{' '}
-                  {'{install_dir}'} for the install directory.
+                  Start/Stop need a long-running command. Use{' '}
+                  {'{install_dir}'} for the install directory, then test the
+                  command before saving it.
                 </p>
+                {detail.startReason && (
+                  <p className="preview-warning">{detail.startReason}</p>
+                )}
                 <div className="import-row">
                   <input
+                    ref={startInputRef}
                     className="popover-input"
                     type="text"
                     placeholder="{install_dir}/app serve"
                     value={startCommandInput}
                     disabled={busy}
-                    onChange={(event) =>
+                    onChange={(event) => {
                       setStartCommandInput(event.target.value)
-                    }
+                      setVerification(null)
+                    }}
                     onKeyDown={(event) => {
                       if (event.key === 'Enter' && !busy) {
                         void handleSaveStartCommand()
@@ -505,12 +597,86 @@ export function AppDetail({
                   <button
                     type="button"
                     className="popover-button"
-                    disabled={busy}
+                    disabled={busy || !verification?.ok}
+                    title={
+                      verification?.ok
+                        ? 'Save the verified start command'
+                        : 'Test the command successfully first'
+                    }
                     onClick={() => void handleSaveStartCommand()}
                   >
                     Save
                   </button>
+                  <button
+                    type="button"
+                    className="popover-button"
+                    disabled={busy || detecting}
+                    onClick={() => void handleDetectStartCommands()}
+                  >
+                    {detecting ? 'Detecting…' : 'Detect'}
+                  </button>
+                  <button
+                    type="button"
+                    className="popover-button"
+                    disabled={busy}
+                    onClick={() => void handleTestStartCommand()}
+                  >
+                    Test
+                  </button>
                 </div>
+                {verification && (
+                  <p
+                    className={
+                      verification.ok
+                        ? 'detail-description'
+                        : 'preview-warning'
+                    }
+                    role="status"
+                  >
+                    {verification.ok ? 'Verified: ' : 'Not usable: '}
+                    {verification.reason}
+                    {verification.output
+                      ? ` Output: ${verification.output}`
+                      : ''}
+                  </p>
+                )}
+                {candidates.length > 0 && (
+                  <>
+                    <p className="detail-description">
+                      Suggested commands (unverified until tested):
+                    </p>
+                    {candidates.map((candidate, index) => (
+                      <div
+                        className="detail-row"
+                        key={`${candidate.command.join(' ')}-${index}`}
+                        title={candidate.reason}
+                      >
+                        <span className="detail-path">
+                          {candidate.command.join(' ')}
+                        </span>
+                        <span>
+                          <span
+                            className={`usage-badge usage-badge--${
+                              candidate.confidence === 'high'
+                                ? 'verified'
+                                : 'unverified'
+                            }`}
+                          >
+                            {candidate.confidence}
+                          </span>{' '}
+                          <button
+                            type="button"
+                            className="popover-button"
+                            disabled={busy}
+                            onClick={() => handleApplyCandidate(candidate)}
+                          >
+                            Use
+                          </button>
+                        </span>
+                      </div>
+                    ))}
+                  </>
+                )}
               </div>
             )}
 

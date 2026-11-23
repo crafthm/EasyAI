@@ -26,7 +26,7 @@ export type PrimaryAction = {
 }
 
 export function primaryAction(
-  app: Pick<AppSummary, 'state' | 'managed' | 'draft'>,
+  app: Pick<AppSummary, 'state' | 'managed' | 'draft' | 'startable'>,
 ): PrimaryAction {
   if (app.draft) {
     return { label: 'No install method', disabled: true }
@@ -35,7 +35,11 @@ export function primaryAction(
     case 'not_installed':
       return { label: 'Install', disabled: false }
     case 'stopped':
-      return { label: 'Start', disabled: false }
+      // An app without a verified start contract must be configured first;
+      // pressing Start would only run a one-shot CLI and fail.
+      return app.startable
+        ? { label: 'Start', disabled: false }
+        : { label: 'Configure start command', disabled: false }
     case 'running':
       return app.managed
         ? { label: 'Stop', disabled: false }
